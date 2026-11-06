@@ -10,23 +10,24 @@ import {Currency, CurrencyLibrary} from "v4-core/src/types/Currency.sol";
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {HamsterNapHook} from "../src/HamsterNapHook.sol";
+import {HamsterNap3D} from "../src/HamsterNap3D.sol";
 import {NapToken} from "../src/NapToken.sol";
 import {HookFlags} from "../src/HookFlags.sol";
 import {Swapper} from "./mocks/Swapper.sol";
 import {MockSqueekCore} from "./mocks/MockSqueekCore.sol";
 
 /// @notice Shared scaffolding: a PoolManager, the NAP token, the hook mined onto its flags, a mock
-/// SqueekCore etched at the hook's constant core address, and a funded test router.
+/// SqueekCore etched at the hook's initial core address, and a funded test router.
 abstract contract HookTestBase is Test {
     uint160 internal constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     uint24 internal constant POOL_FEE = 12_500;
     int24 internal constant TICK_SPACING = 60;
-    uint64 internal constant GENESIS = 1793022600;
+    uint64 internal constant GENESIS = 1793735400;
     uint64 internal constant ROUND = 600;
     uint160 internal constant HOOK_FLAGS = HookFlags.BEFORE_INITIALIZE | HookFlags.BEFORE_SWAP | HookFlags.AFTER_SWAP
         | HookFlags.BEFORE_SWAP_RETURN_DELTA | HookFlags.AFTER_SWAP_RETURN_DELTA;
 
+    address internal owner = makeAddr("owner");
     address internal factory = makeAddr("factory");
     address internal alice = makeAddr("alice");
     address internal bob = makeAddr("bob");
@@ -35,7 +36,7 @@ abstract contract HookTestBase is Test {
 
     PoolManager internal manager;
     NapToken internal token;
-    HamsterNapHook internal hook;
+    HamsterNap3D internal hook;
     MockSqueekCore internal core;
     Swapper internal swapper;
     PoolKey internal key;
@@ -43,12 +44,12 @@ abstract contract HookTestBase is Test {
     uint256 internal nextSalt;
 
     function setUp() public virtual {
-        // A moment in round 650, after the live frontier captured on 2026-10-31.
+        // A moment in round 650. Historical work fixtures are replayed on the new default timing.
         vm.warp(roundStart(650) + 17);
         manager = new PoolManager(address(this));
         token = new NapToken();
         hook = deployHook(manager, factory);
-        core = MockSqueekCore(address(hook.CORE()));
+        core = MockSqueekCore(address(hook.core()));
         vm.etch(address(core), address(new MockSqueekCore()).code);
         key = PoolKey({
             currency0: CurrencyLibrary.ADDRESS_ZERO,
@@ -68,15 +69,16 @@ abstract contract HookTestBase is Test {
     // ---------------------------------------------------------------- deployment
 
     /// @dev Mines a CREATE2 salt from this contract so the hook lands on an address carrying its flags.
-    function deployHook(IPoolManager manager_, address factory_) internal returns (HamsterNapHook deployed) {
-        bytes memory creationCode = abi.encodePacked(type(HamsterNapHook).creationCode, abi.encode(manager_, factory_));
+    function deployHook(IPoolManager manager_, address factory_) internal returns (HamsterNap3D deployed) {
+        bytes memory creationCode =
+            abi.encodePacked(type(HamsterNap3D).creationCode, abi.encode(manager_, factory_, owner));
         bytes32 initCodeHash = keccak256(creationCode);
         for (uint256 i = nextSalt; i < nextSalt + 500_000; i++) {
             address predicted = address(
                 uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), bytes32(i), initCodeHash))))
             );
             if (!HookFlags.matches(predicted, HOOK_FLAGS)) continue;
-            deployed = new HamsterNapHook{salt: bytes32(i)}(manager_, factory_);
+            deployed = new HamsterNap3D{salt: bytes32(i)}(manager_, factory_, owner);
             require(address(deployed) == predicted, "mined address mismatch");
             nextSalt = i + 1;
             return deployed;
@@ -129,11 +131,11 @@ abstract contract HookTestBase is Test {
 
     // ---------------------------------------------------------------- rounds and the core
 
-    function roundStart(uint64 round) internal pure returns (uint256) {
+    function roundStart(uint64 round) internal pure virtual returns (uint256) {
         return GENESIS + uint256(round - 1) * ROUND;
     }
 
-    function roundEnd(uint64 round) internal pure returns (uint256) {
+    function roundEnd(uint64 round) internal pure virtual returns (uint256) {
         return GENESIS + uint256(round) * ROUND;
     }
 

@@ -16,7 +16,7 @@ contract NapTokenTest is Test {
         assertEq(token.totalSupply(), 1e27);
         assertEq(token.balanceOf(address(this)), 1e27);
         assertEq(token.decimals(), 18);
-        assertEq(token.name(), "Hamster Nap");
+        assertEq(token.name(), "Hamster Nap 3D");
         assertEq(token.symbol(), "NAP");
     }
 

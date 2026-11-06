@@ -8,7 +8,7 @@ import {NapSequenceHandler} from "./independent/NapSequenceHandler.sol";
 /// forge-config: default.invariant.runs = 256
 /// forge-config: default.invariant.depth = 96
 /// forge-config: default.invariant.fail-on-revert = true
-contract HamsterNapHookInvariantTest is HookTestBase {
+contract HamsterNap3DInvariantTest is HookTestBase {
     NapSequenceHandler private handler;
 
     function setUp() public override {
@@ -143,7 +143,7 @@ contract HamsterNapHookInvariantTest is HookTestBase {
 /// forge-config: default.invariant.runs = 256
 /// forge-config: default.invariant.depth = 96
 /// forge-config: default.invariant.fail-on-revert = true
-contract HamsterNapHookRecoveryInvariantTest is HamsterNapHookInvariantTest {
+contract HamsterNap3DRecoveryInvariantTest is HamsterNap3DInvariantTest {
     function _includeFailsafe() internal pure override returns (bool) {
         return true;
     }

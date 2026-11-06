@@ -2,12 +2,12 @@
 pragma solidity 0.8.26;
 
 import {HookTestBase} from "./HookTestBase.sol";
-import {HamsterNapHook} from "../src/HamsterNapHook.sol";
+import {HamsterNap3D} from "../src/HamsterNap3D.sol";
 import {ISqueekCore} from "../src/interfaces/ISqueekCore.sol";
 import {SepoliaRounds} from "./fixtures/SepoliaRounds.sol";
 
 /// @notice The game replayed over the real round pages captured from the live Sepolia core.
-contract HamsterNapHookSepoliaTest is HookTestBase {
+contract HamsterNap3DSepoliaTest is HookTestBase {
     function setUp() public override {
         super.setUp();
         seedBothSides(1_000_000 ether);
@@ -60,11 +60,11 @@ contract HamsterNapHookSepoliaTest is HookTestBase {
         vm.warp(roundStart(643) + 10);
 
         vm.expectEmit(true, true, false, true);
-        emit HamsterNapHook.NapSettled(503, bob, fee(3 ether));
+        emit HamsterNap3D.NapSettled(503, bob, fee(3 ether));
         vm.expectEmit(true, true, false, true);
-        emit HamsterNapHook.NapSettled(519, carol, fee(4 ether));
+        emit HamsterNap3D.NapSettled(519, carol, fee(4 ether));
         vm.expectEmit(true, true, false, true);
-        emit HamsterNapHook.NapSettled(540, dave, fee(8 ether));
+        emit HamsterNap3D.NapSettled(540, dave, fee(8 ether));
         uint256 settled = hook.settleNaps(20);
         assertEq(settled, 3);
         assertEq(hook.napsSettled(), 3);
@@ -111,7 +111,7 @@ contract HamsterNapHookSepoliaTest is HookTestBase {
         uint256 opensAt = roundEnd(642) + 7 days;
         assertEq(hook.failsafeOpensAt(), opensAt);
         vm.warp(opensAt - 1);
-        vm.expectRevert(abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, opensAt));
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, opensAt));
         hook.failsafe();
         vm.warp(opensAt);
         hook.failsafe();

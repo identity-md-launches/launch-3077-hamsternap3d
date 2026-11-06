@@ -6,7 +6,7 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {PoolKey} from "v4-core/src/types/PoolKey.sol";
 import {PoolIdLibrary} from "v4-core/src/types/PoolId.sol";
 import {StateLibrary} from "v4-core/src/libraries/StateLibrary.sol";
-import {HamsterNapHook} from "src/HamsterNapHook.sol";
+import {HamsterNap3D} from "src/HamsterNap3D.sol";
 import {Swapper} from "../mocks/Swapper.sol";
 import {RejectingWinner} from "../mocks/RejectingWinner.sol";
 import {SequenceCore} from "./SequenceCore.sol";
@@ -22,7 +22,7 @@ contract NapSequenceHandler is Test {
         address qualifyingBuyer;
     }
 
-    HamsterNapHook public immutable hook;
+    HamsterNap3D public immutable hook;
     SequenceCore public immutable core;
     Swapper public immutable router;
     RejectingWinner public immutable rejecting;
@@ -54,7 +54,7 @@ contract NapSequenceHandler is Test {
     uint256 public failsafeNaps;
     uint256 public unsettledRefusals;
 
-    constructor(HamsterNapHook h, SequenceCore c, Swapper r, PoolKey memory k) {
+    constructor(HamsterNap3D h, SequenceCore c, Swapper r, PoolKey memory k) {
         hook = h;
         core = c;
         router = r;
@@ -140,12 +140,12 @@ contract NapSequenceHandler is Test {
     function settle(uint8 pagesSeed) external {
         uint256 pages = bound(pagesSeed, 1, 3);
         if (cursor == 0) {
-            vm.expectRevert(HamsterNapHook.GameNotStarted.selector);
+            vm.expectRevert(HamsterNap3D.GameNotStarted.selector);
             hook.settleNaps(pages);
             return;
         }
         if (core.unavailable()) {
-            vm.expectRevert(HamsterNapHook.CoreUnreadable.selector);
+            vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
             hook.settleNaps(pages);
             return;
         }
@@ -168,9 +168,9 @@ contract NapSequenceHandler is Test {
         address actor = actors[actorSeed % 4];
         uint256 debt = hook.owed(actor);
         if (debt == 0) {
-            vm.expectRevert(HamsterNapHook.NothingOwed.selector);
+            vm.expectRevert(HamsterNap3D.NothingOwed.selector);
         } else if (actor == address(rejecting) && !rejecting.accepting()) {
-            vm.expectRevert(HamsterNapHook.TransferFailed.selector);
+            vm.expectRevert(HamsterNap3D.TransferFailed.selector);
         } else {
             withdrawals++;
         }
@@ -191,21 +191,19 @@ contract NapSequenceHandler is Test {
     function _failsafe(uint256 extra) private {
         // Seven days after the later of the last sighting and the sighted round's end. An advance
         // the hook has not seen yet must keep the failsafe shut, however old the advanced round is.
-        uint256 since = 1793022600 + uint256(observedFrontier) * 600;
+        uint256 since = 1793735400 + uint256(observedFrontier) * 600;
         if (observedAt > since) since = observedAt;
         uint256 at = since + 7 days;
         if (at > vm.getBlockTimestamp()) vm.warp(at);
         if (extra > 0) vm.warp(vm.getBlockTimestamp() + extra);
         bool unseenAdvance = !core.unavailable() && core.frontier() > observedFrontier;
         if (cursor == 0) {
-            vm.expectRevert(HamsterNapHook.GameNotStarted.selector);
+            vm.expectRevert(HamsterNap3D.GameNotStarted.selector);
             hook.failsafe();
             return;
         }
         if (unseenAdvance) {
-            vm.expectRevert(
-                abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, vm.getBlockTimestamp() + 7 days)
-            );
+            vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, vm.getBlockTimestamp() + 7 days));
             hook.failsafe();
             return;
         }
@@ -214,7 +212,7 @@ contract NapSequenceHandler is Test {
         if (!core.unavailable() && cursor <= observedFrontier) {
             if (observedFrontier - cursor + 1 > 8 * 16) {
                 vm.expectRevert(
-                    abi.encodeWithSelector(HamsterNapHook.NapsUnsettled.selector, cursor + 8 * 16, observedFrontier)
+                    abi.encodeWithSelector(HamsterNap3D.NapsUnsettled.selector, cursor + 8 * 16, observedFrontier)
                 );
                 hook.failsafe();
                 unsettledRefusals++;
@@ -234,7 +232,7 @@ contract NapSequenceHandler is Test {
             if (history[i].qualifyingBuyer != address(0)) winner = history[i].qualifyingBuyer;
         }
         if (winner == address(0)) {
-            vm.expectRevert(HamsterNapHook.NoQualifyingBuyer.selector);
+            vm.expectRevert(HamsterNap3D.NoQualifyingBuyer.selector);
             hook.failsafe();
             return;
         }
@@ -260,7 +258,7 @@ contract NapSequenceHandler is Test {
                 awards[actors[i]] = awardsBefore[i];
             }
             assertEq(history.length, count);
-            vm.expectRevert(HamsterNapHook.NothingToPay.selector);
+            vm.expectRevert(HamsterNap3D.NothingToPay.selector);
             hook.failsafe();
             return;
         }
@@ -359,7 +357,7 @@ contract NapSequenceHandler is Test {
     }
 
     function _round() private view returns (uint64) {
-        return uint64((vm.getBlockTimestamp() - 1793022600) / 600 + 1);
+        return uint64((vm.getBlockTimestamp() - 1793735400) / 600 + 1);
     }
 
     function _amount(uint256 seed, uint8 kind) private pure returns (uint256) {

@@ -15,34 +15,36 @@ import {BaseHook} from "./base/BaseHook.sol";
 import {ISqueekCore} from "./interfaces/ISqueekCore.sol";
 import {ISworn} from "./interfaces/ISworn.sol";
 
-/// @title Hamster Nap: a last-buyer-before-bedtime game on SqueekChain's hamster
+/// @title Hamster Nap 3D: a last-buyer-before-bedtime game on SqueekChain's hamster
 /// @notice One Uniswap v4 hook on the NAP / ETH pool. Every buy of NAP pays 2% of its ETH into a pot
 /// the hook holds and, if it spends at least 0.001 ETH, makes the buyer's wallet the latest buyer.
 /// When SqueekCore certifies a nap (three consecutive settled rounds with zero work), the last
 /// qualifying buyer whose buy happened before the nap's first round started takes the pot collected
-/// up to that round. Sells pay no game fee and never read the core. Nobody has owner powers: no
-/// pause, no upgrade, no signer, no keeper, no withdrawal by anyone but winners.
+/// up to that round. Sells pay no game fee and never read the core. The launch owner may replace
+/// the core until permanently finalized, but cannot pause, upgrade, change fees or withdraw the pot.
 /// @dev The pot is the hook's own ETH (plus ERC-6909 ETH claims on the PoolManager when the manager
 /// could not pay the fee out in ETH at swap time, redeemed before any payout). `pot()` is the
 /// authoritative figure: fees in minus payouts, and the hook's ETH plus claims always cover it plus
 /// what deferred winners are owed.
-contract HamsterNapHook is BaseHook, IUnlockCallback {
+contract HamsterNap3D is BaseHook, IUnlockCallback {
     using PoolIdLibrary for PoolKey;
     using SafeCast for uint256;
     using SafeCast for int256;
 
     // ---------------------------------------------------------------- game constants
 
-    /// @notice The live SqueekCore proxy on Sepolia that the SqueekChain API and livestream follow.
-    ISqueekCore public constant CORE = ISqueekCore(0x980B4424c007CAf7a1f3670B48c8EaEf7EbC3d44);
-    /// @notice SqueekCore `configuration().genesisTimestamp`: round 1 starts here.
-    uint64 public constant GENESIS_TIMESTAMP = 1793022600;
-    /// @notice SqueekCore `configuration().roundDuration` in seconds.
-    uint64 public constant ROUND_DURATION = 600;
-    /// @notice Consecutive settled zero-work rounds that make a nap (30 minutes).
+    /// @notice Consecutive settled zero-work rounds that make a nap (30 minutes at initial timing).
     uint64 public constant NAP_ROUNDS = 3;
     /// @notice The most records one `roundPage` call returns, so the most rounds scanned per page.
     uint64 public constant PAGE_ROUNDS = 16;
+    /// @notice Maximum gas forwarded to each core read. An exhausted read is treated as unreadable,
+    /// so an upgraded or broken core cannot consume all gas needed for migration or the failsafe.
+    uint256 public constant CORE_READ_GAS = 5_000_000;
+    /// @dev EIP-150 headroom plus call/encoding overhead so an old-core probe receives its full
+    /// budget. Otherwise an owner could starve a readable probe to bypass pending-nap settlement.
+    uint256 private constant MIN_CORE_READ_GAS = CORE_READ_GAS + CORE_READ_GAS / 63 + 10_000;
+    /// @dev ABI size of a RoundPage with the maximum 16 five-word checkpoints.
+    uint256 private constant MAX_PAGE_BYTES = 320 + uint256(PAGE_ROUNDS) * 160;
     /// @notice Buy fee in basis points of the ETH a buy spends: 2%.
     uint256 public constant FEE_BPS = 200;
     uint256 public constant BPS = 10_000;
@@ -66,6 +68,19 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
 
     /// @notice The launch factory: the only sender allowed to open this hook's pool.
     address public immutable factory;
+
+    /// @notice The launch's owner; only core replacement and permanent finalization are authorized.
+    /// There is no ownership transfer or renunciation function.
+    address public immutable owner;
+    /// @notice The SqueekCore proxy followed by the game. Initial values were measured on Sepolia
+    /// on 2026-11-06 and are literals, so construction never reads another contract.
+    ISqueekCore public core = ISqueekCore(0xFD6C166D4B8E2962E65746a13e5a0797CD4dE0c4);
+    /// @notice The active core's genesis: round 1 starts here. Updated only by setCore.
+    uint64 public GENESIS_TIMESTAMP = 1793735400;
+    /// @notice The active core's round length in seconds. Updated only by setCore.
+    uint64 public ROUND_DURATION = 600;
+    /// @notice Once true, the core address and cached timing can never be changed by this hook.
+    bool public coreFinalized;
 
     /// @notice The pool this hook serves, bound in `beforeInitialize`.
     PoolId public poolId;
@@ -101,13 +116,13 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     /// @notice ERC-6909 ETH claims on the PoolManager the hook holds instead of ETH.
     uint256 public claimsHeld;
 
-    /// @notice The next round the nap scan examines; 0 until the pool's first swap starts the game.
+    /// @notice The next round examined; 0 until the first swap or a core switch starts the scan.
     uint64 public scanRound;
     /// @notice Consecutive zero-work rounds seen ending at `scanRound - 1`.
     uint64 public zeroRun;
     /// @notice The first round of the current zero-work run.
     uint64 public zeroRunStart;
-    /// @notice The highest `settledThroughRound` the hook has read from the core.
+    /// @notice The highest frontier observed on the active core (rebased on each core switch).
     uint64 public lastSeenFrontier;
     /// @notice When the hook last saw `settledThroughRound` advance; the game's start until it does.
     /// The failsafe's seven days count from here (or from the frontier round's end, if later).
@@ -131,6 +146,8 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     event OwedWithdrawn(address indexed winner, uint256 amount);
     event ClaimsRedeemed(uint256 amount);
     event FrontierSeen(uint64 frontier);
+    event CoreChanged(address indexed oldCore, address indexed newCore);
+    event CoreFinalized(address indexed core);
 
     // ---------------------------------------------------------------- errors
 
@@ -150,9 +167,22 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     error ZeroPages();
     error CoreUnreadable();
     error NapsUnsettled(uint64 scanRound, uint64 frontier);
+    error NotOwner();
+    error InvalidOwner();
+    error CoreIsFinalized();
+    error InvalidRoundDuration();
+    error InvalidCoreFrontier();
+    error InsufficientCoreReadGas();
 
-    constructor(IPoolManager poolManager_, address factory_) BaseHook(poolManager_) {
+    constructor(IPoolManager poolManager_, address factory_, address owner_) BaseHook(poolManager_) {
+        if (owner_ == address(0)) revert InvalidOwner();
         factory = factory_;
+        owner = owner_;
+    }
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert NotOwner();
+        _;
     }
 
     modifier nonReentrant() {
@@ -165,6 +195,42 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     /// @dev ETH arrives only from the PoolManager (fee takes and claim redemptions).
     receive() external payable {
         if (msg.sender != address(poolManager)) revert NotFromPoolManager();
+    }
+
+    // ---------------------------------------------------------------- core administration
+
+    /// @notice Replaces the core and its timing, until finalizeCore permanently disables this.
+    /// Readable old-core rounds must first be scanned with settleNaps. If state or the next pending
+    /// page cannot be read, the unscanned old rounds are dropped. No money or buy history is reset.
+    /// @dev Every external dependency read is static. The payout lock also prevents an owner who
+    /// wins a nap from switching timelines during an in-progress settlement.
+    function setCore(ISqueekCore newCore) external onlyOwner nonReentrant {
+        if (coreFinalized) revert CoreIsFinalized();
+        _requireOldCoreCaughtUp();
+        (uint64 genesis, uint64 duration) = _readConfiguration(newCore);
+        (bool ok, uint64 frontier) = _readFrontierFrom(newCore);
+        if (!ok) revert CoreUnreadable();
+        // scanRound must represent the first round after the new frontier.
+        if (frontier == type(uint64).max) revert InvalidCoreFrontier();
+
+        address oldCore = address(core);
+        core = newCore;
+        GENESIS_TIMESTAMP = genesis;
+        ROUND_DURATION = duration;
+        scanRound = frontier + 1;
+        zeroRun = 0;
+        zeroRunStart = 0;
+        lastSeenFrontier = frontier;
+        frontierSeenAt = block.timestamp;
+        emit CoreChanged(oldCore, address(newCore));
+    }
+
+    /// @notice Permanently fixes the selected core and its cached timing. This does not freeze
+    /// upgrades or reporting by SqueekChain's own proxy/operator.
+    function finalizeCore() external onlyOwner nonReentrant {
+        if (coreFinalized) revert CoreIsFinalized();
+        coreFinalized = true;
+        emit CoreFinalized(address(core));
     }
 
     // ---------------------------------------------------------------- hook permissions
@@ -337,7 +403,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
             (, bool readable) = _scan(frontier, FAILSAFE_SCAN_PAGES);
             if (readable && scanRound <= frontier) revert NapsUnsettled(scanRound, frontier);
         }
-        (address winner, uint256 cumulative) = _stateBefore(_failsafeCutoff(staleAt), true);
+        (address winner, uint256 cumulative) = _stateBefore(_failsafeCutoff(staleAt));
         if (winner == address(0)) revert NoQualifyingBuyer();
         if (cumulative <= cumulativePaid) revert NothingToPay();
         uint256 amount = cumulative - cumulativePaid;
@@ -387,7 +453,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     }
 
     /// @notice The SqueekCore round at `timestamp` (0 before genesis).
-    function roundAt(uint256 timestamp) public pure returns (uint64) {
+    function roundAt(uint256 timestamp) public view returns (uint64) {
         if (timestamp < GENESIS_TIMESTAMP) return 0;
         return uint64((timestamp - GENESIS_TIMESTAMP) / ROUND_DURATION + 1);
     }
@@ -398,13 +464,13 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     }
 
     /// @notice The first second of `round`.
-    function roundStart(uint64 round) public pure returns (uint256) {
+    function roundStart(uint64 round) public view returns (uint256) {
         if (round == 0) return GENESIS_TIMESTAMP;
         return GENESIS_TIMESTAMP + uint256(round - 1) * ROUND_DURATION;
     }
 
     /// @notice The first second after `round`.
-    function roundEnd(uint64 round) public pure returns (uint256) {
+    function roundEnd(uint64 round) public view returns (uint256) {
         return GENESIS_TIMESTAMP + uint256(round) * ROUND_DURATION;
     }
 
@@ -433,7 +499,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     /// @notice Who would win a nap that begins at `napStart`, and how much, from the records so far.
     function winnerBefore(uint64 napStart) external view returns (address winner, uint256 amount) {
         uint256 cumulative;
-        (winner, cumulative) = _stateBefore(napStart, false);
+        (winner, cumulative) = _stateBefore(roundStart(napStart));
         if (winner == address(0) || cumulative <= cumulativePaid) return (winner, 0);
         amount = cumulative - cumulativePaid;
     }
@@ -443,7 +509,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     /// are not yet paid out, before any certified nap still to be settled is paid out of them.
     function failsafeWinner() external view returns (address winner, uint256 amount) {
         uint256 cumulative;
-        (winner, cumulative) = _stateBefore(_failsafeCutoff(failsafeOpensAt()), true);
+        (winner, cumulative) = _stateBefore(_failsafeCutoff(failsafeOpensAt()));
         if (winner == address(0) || cumulative <= cumulativePaid) return (winner, 0);
         amount = cumulative - cumulativePaid;
     }
@@ -530,12 +596,70 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     }
 
     function _readFrontier() private view returns (bool ok, uint64 frontier) {
-        (bool success, bytes memory ret) = address(CORE).staticcall(abi.encodeCall(ISqueekCore.state, ()));
+        return _readFrontierFrom(core);
+    }
+
+    function _readFrontierFrom(ISqueekCore target) private view returns (bool ok, uint64 frontier) {
+        (bool success, bytes memory ret) = _coreRead(target, abi.encodeCall(ISqueekCore.state, ()), 256);
         // CoreState is eight static words; the first is settledThroughRound.
         if (!success || ret.length != 256) return (false, 0);
         uint256 word = abi.decode(ret, (uint256));
         if (word > type(uint64).max) return (false, 0);
         return (true, uint64(word));
+    }
+
+    function _readConfiguration(ISqueekCore target) private view returns (uint64 genesis, uint64 duration) {
+        (bool ok, bytes memory ret) = _coreRead(target, abi.encodeCall(ISqueekCore.configuration, ()), 352);
+        // CoreConfiguration has eleven static words. Only genesis and duration affect this game.
+        if (!ok || ret.length != 352) revert CoreUnreadable();
+        (, uint256 genesisWord, uint256 durationWord) = abi.decode(ret, (bytes32, uint256, uint256));
+        if (genesisWord > type(uint64).max || durationWord > type(uint64).max) revert CoreUnreadable();
+        if (durationWord == 0) revert InvalidRoundDuration();
+        return (uint64(genesisWord), uint64(durationWord));
+    }
+
+    /// @dev Bound both forwarded gas and copied returndata. A core returning a huge malformed ABI
+    /// must not exhaust the caller while it tries to recover from that very core. Expected sizes
+    /// follow ISqueekCore; the external decoder still catches malformed dynamic page offsets.
+    function _coreRead(ISqueekCore target, bytes memory data, uint256 maxBytes)
+        private
+        view
+        returns (bool ok, bytes memory result)
+    {
+        result = new bytes(maxBytes);
+        assembly ("memory-safe") {
+            ok := staticcall(CORE_READ_GAS, target, add(data, 32), mload(data), add(result, 32), maxBytes)
+            switch and(ok, iszero(gt(returndatasize(), maxBytes)))
+            case 1 { mstore(result, returndatasize()) }
+            default {
+                ok := 0
+                mstore(result, 0)
+            }
+        }
+    }
+
+    /// @dev Conservatively requires all readable pending rounds to be scanned, even if they turn
+    /// out to contain no nap. Probe just the next page; settleNaps can make bounded progress first.
+    function _requireOldCoreCaughtUp() private view {
+        if (scanRound == 0) return;
+        _requireCoreReadGas();
+        (bool ok, uint64 frontier) = _readFrontier();
+        if (!ok) return;
+        if (frontier < lastSeenFrontier) frontier = lastSeenFrontier;
+        if (scanRound > frontier) return;
+        uint64 through = uint64(_pageEnd(scanRound, frontier));
+        _requireCoreReadGas();
+        (bool readable, ISqueekCore.RoundPage memory page) = _readPage(scanRound, through);
+        if (readable && page.certifiedThroughRound >= scanRound) revert NapsUnsettled(scanRound, frontier);
+    }
+
+    function _requireCoreReadGas() private view {
+        if (gasleft() < MIN_CORE_READ_GAS) revert InsufficientCoreReadGas();
+    }
+
+    function _pageEnd(uint64 from, uint64 frontier) private pure returns (uint256) {
+        uint256 end = uint256(from) + PAGE_ROUNDS - 1;
+        return end > frontier ? frontier : end;
     }
 
     /// @dev Records an observed advance of the frontier and when it was seen. The observation time
@@ -555,8 +679,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
         readable = true;
         uint64 from = scanRound;
         for (uint256 page = 0; page < maxPages && from <= frontier; page++) {
-            uint64 through = from + PAGE_ROUNDS - 1;
-            if (through > frontier) through = frontier;
+            uint64 through = uint64(_pageEnd(from, frontier));
             (bool ok, ISqueekCore.RoundPage memory result) = _readPage(from, through);
             uint64 certified = ok ? result.certifiedThroughRound : 0;
             if (certified > through) certified = through;
@@ -589,7 +712,7 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
     /// re-ABI'd core revert the caller: the caller decides what an unreadable core means.
     function _readPage(uint64 from, uint64 through) private view returns (bool ok, ISqueekCore.RoundPage memory page) {
         (bool success, bytes memory ret) =
-            address(CORE).staticcall(abi.encodeCall(ISqueekCore.roundPage, (from - 1, through, PAGE_ROUNDS)));
+            _coreRead(core, abi.encodeCall(ISqueekCore.roundPage, (from - 1, through, PAGE_ROUNDS)), MAX_PAGE_BYTES);
         if (!success) return (false, page);
         try this.decodeRoundPage(ret) returns (ISqueekCore.RoundPage memory decoded) {
             return (true, decoded);
@@ -598,32 +721,27 @@ contract HamsterNapHook is BaseHook, IUnlockCallback {
         }
     }
 
-    /// @dev The state after the last recorded buy strictly before `bound`: a round (the first round
-    /// of a nap) when `byTime` is false, a timestamp (the failsafe's cutoff) when it is true.
-    /// Records are appended in time order, so both keys are non-decreasing along `_buys`.
-    function _stateBefore(uint256 bound, bool byTime) private view returns (address winner, uint256 cumulative) {
+    /// @dev The state after the last buy strictly before timestamp `bound`. Timestamps remain
+    /// ordered across core switches; stored round numbers are historical and can move backwards.
+    function _stateBefore(uint256 bound) private view returns (address winner, uint256 cumulative) {
         uint256 length = _buys.length;
-        if (length == 0 || _keyOf(_buys[0], byTime) >= bound) return (address(0), 0);
+        if (length == 0 || _buys[0].time >= bound) return (address(0), 0);
         // Largest index whose key < bound. _buys[lo].key < bound holds throughout.
         uint256 lo = 0;
         uint256 hi = length - 1;
         while (lo < hi) {
             uint256 mid = (lo + hi + 1) / 2;
-            if (_keyOf(_buys[mid], byTime) < bound) lo = mid;
+            if (_buys[mid].time < bound) lo = mid;
             else hi = mid - 1;
         }
         BuyRecord storage record = _buys[lo];
         return (record.latestBuyer, record.cumulativeFees);
     }
 
-    function _keyOf(BuyRecord storage record, bool byTime) private view returns (uint256) {
-        return byTime ? record.time : record.round;
-    }
-
     function _settleNap(uint64 napStart) private {
         napsSettled++;
         firstNapSettled = true;
-        (address winner, uint256 cumulative) = _stateBefore(napStart, false);
+        (address winner, uint256 cumulative) = _stateBefore(roundStart(napStart));
         uint256 amount;
         if (winner != address(0) && cumulative > cumulativePaid) {
             amount = cumulative - cumulativePaid;

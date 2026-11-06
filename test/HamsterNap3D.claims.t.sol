@@ -3,11 +3,11 @@ pragma solidity 0.8.26;
 
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {HookTestBase} from "./HookTestBase.sol";
-import {HamsterNapHook} from "../src/HamsterNapHook.sol";
+import {HamsterNap3D} from "../src/HamsterNap3D.sol";
 
 /// @notice A fresh PoolManager whose pool was seeded with tokens only holds no ETH when the first
 /// buy's fee is due, so the hook takes an ERC-6909 claim instead and redeems it before paying.
-contract HamsterNapHookClaimsTest is HookTestBase {
+contract HamsterNap3DClaimsTest is HookTestBase {
     function setUp() public override {
         super.setUp();
         seedTokensOnly(1_000_000 ether);
@@ -17,7 +17,7 @@ contract HamsterNapHookClaimsTest is HookTestBase {
 
     function test_firstBuyOnTokenOnlyPoolMintsAClaim() public {
         vm.expectEmit(true, false, false, true);
-        emit HamsterNapHook.Buy(alice, 1 ether, 0.02 ether, 650, true);
+        emit HamsterNap3D.Buy(alice, 1 ether, 0.02 ether, 650, true);
         BalanceDelta delta = buy(alice, 1 ether);
         assertEq(delta.amount0(), -1 ether);
         assertGt(delta.amount1(), 0);
@@ -49,7 +49,7 @@ contract HamsterNapHookClaimsTest is HookTestBase {
         buy(alice, 1 ether);
         vm.prank(carol);
         vm.expectEmit(false, false, false, true);
-        emit HamsterNapHook.ClaimsRedeemed(0.02 ether);
+        emit HamsterNap3D.ClaimsRedeemed(0.02 ether);
         hook.redeemClaims();
         assertEq(hook.claimsHeld(), 0);
         assertEq(address(hook).balance, 0.02 ether);

@@ -26,7 +26,7 @@ contract SequenceCore is ISqueekCore {
 
     function certify(uint64 count, uint256 workBits) external {
         require(count <= 16);
-        require(1793022600 + uint256(frontier + count) * 600 <= block.timestamp, "unclosed round");
+        require(1793735400 + uint256(frontier + count) * 600 <= block.timestamp, "unclosed round");
         for (uint64 i; i < count; i++) {
             uint64 round = frontier + 1;
             worked[round] = workBits & (uint256(1) << i) != 0;
@@ -43,7 +43,7 @@ contract SequenceCore is ISqueekCore {
     }
 
     function configuration() external pure returns (CoreConfiguration memory c) {
-        c.genesisTimestamp = 1793022600;
+        c.genesisTimestamp = 1793735400;
         c.roundDuration = 600;
         c.maxRoundsPerBatch = 16;
     }

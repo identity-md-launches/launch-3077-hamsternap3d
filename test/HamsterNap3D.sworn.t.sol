@@ -2,11 +2,11 @@
 pragma solidity 0.8.26;
 
 import {HookTestBase} from "./HookTestBase.sol";
-import {HamsterNapHook} from "../src/HamsterNapHook.sol";
+import {HamsterNap3D} from "../src/HamsterNap3D.sol";
 import {MockSworn} from "./mocks/MockSworn.sol";
 
 /// @notice The first game is for Sworn card holders on Ethereum mainnet only.
-contract HamsterNapHookSwornTest is HookTestBase {
+contract HamsterNap3DSwornTest is HookTestBase {
     MockSworn sworn;
 
     function setUp() public override {

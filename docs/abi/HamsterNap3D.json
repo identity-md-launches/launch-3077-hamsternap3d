@@ -11,6 +11,11 @@
         "name": "factory_",
         "type": "address",
         "internalType": "address"
+      },
+      {
+        "name": "owner_",
+        "type": "address",
+        "internalType": "address"
       }
     ],
     "stateMutability": "nonpayable"
@@ -34,13 +39,13 @@
   },
   {
     "type": "function",
-    "name": "CORE",
+    "name": "CORE_READ_GAS",
     "inputs": [],
     "outputs": [
       {
         "name": "",
-        "type": "address",
-        "internalType": "contract ISqueekCore"
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ],
     "stateMutability": "view"
@@ -989,7 +994,7 @@
       {
         "name": "",
         "type": "tuple",
-        "internalType": "struct HamsterNapHook.BuyRecord",
+        "internalType": "struct HamsterNap3D.BuyRecord",
         "components": [
           {
             "name": "round",
@@ -1038,6 +1043,32 @@
         "name": "",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "core",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "contract ISqueekCore"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "coreFinalized",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
       }
     ],
     "stateMutability": "view"
@@ -1249,6 +1280,13 @@
   },
   {
     "type": "function",
+    "name": "finalizeCore",
+    "inputs": [],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
     "name": "firstGame",
     "inputs": [],
     "outputs": [
@@ -1450,6 +1488,19 @@
   },
   {
     "type": "function",
+    "name": "owner",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "poolBound",
     "inputs": [],
     "outputs": [
@@ -1524,7 +1575,7 @@
         "internalType": "uint64"
       }
     ],
-    "stateMutability": "pure"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1543,7 +1594,7 @@
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "pure"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1562,7 +1613,7 @@
         "internalType": "uint256"
       }
     ],
-    "stateMutability": "pure"
+    "stateMutability": "view"
   },
   {
     "type": "function",
@@ -1576,6 +1627,19 @@
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "setCore",
+    "inputs": [
+      {
+        "name": "newCore",
+        "type": "address",
+        "internalType": "contract ISqueekCore"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
@@ -1750,6 +1814,38 @@
   },
   {
     "type": "event",
+    "name": "CoreChanged",
+    "inputs": [
+      {
+        "name": "oldCore",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "newCore",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "CoreFinalized",
+    "inputs": [
+      {
+        "name": "core",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "FailsafeTaken",
     "inputs": [
       {
@@ -1907,6 +2003,11 @@
   },
   {
     "type": "error",
+    "name": "CoreIsFinalized",
+    "inputs": []
+  },
+  {
+    "type": "error",
     "name": "CoreNotStale",
     "inputs": [
       {
@@ -1929,6 +2030,26 @@
   {
     "type": "error",
     "name": "HookNotImplemented",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InsufficientCoreReadGas",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidCoreFrontier",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidOwner",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidRoundDuration",
     "inputs": []
   },
   {
@@ -1960,6 +2081,11 @@
   {
     "type": "error",
     "name": "NotFromPoolManager",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "NotOwner",
     "inputs": []
   },
   {

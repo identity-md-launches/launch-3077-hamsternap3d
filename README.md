@@ -1,30 +1,41 @@
-# Hamster Nap (NAP)
+# Hamster Nap 3D (NAP)
 
 A last-buyer-before-bedtime game on Squeektoshi, SqueekChain's real hamster, as one Uniswap v4
-hook on Ethereum Sepolia. Every buy of NAP pays 2% of its ETH into a pot the hook holds and makes
-the buyer the latest buyer. When SqueekCore certifies a nap, the last buyer before the nap began
+hook on Ethereum Sepolia. Every buy of NAP pays 2% of its ETH into a pot the hook holds. A buy
+spending at least 0.001 ETH makes its buyer the latest qualifying buyer. When SqueekCore certifies a nap, the last buyer before the nap began
 takes the pot. An unofficial community game with Sepolia test tokens of no value, not affiliated
 with SqueekChain.
 
 This repository is the contract stage: the token, the hook, their tests and ABI documentation.
-The launch (publish, attest, admit, deploy) and the website come after it.
+The launch (publish, attest, admit, deploy) and the website come after it. The existing
+`launch.json`, `web/deployment.handoff.json`, `dist/` and `docs/frontend/` describe an earlier
+deployment; they are not deployment evidence for HamsterNap3D. The separate manifest assignment
+must replace that manifest, and the website assignment must refresh the site after deployment.
+This source contribution changes contracts, tests and contract documentation only.
 
 ## What the launch deploys
 
 | Contract | File | Constructor arguments |
 | --- | --- | --- |
 | `NapToken` | `src/NapToken.sol` | none |
-| `HamsterNapHook` | `src/HamsterNapHook.sol` | `IPoolManager poolManager` = `$poolManager`, `address factory` = `$factory` |
+| `HamsterNap3D` | `src/HamsterNap3D.sol` | `IPoolManager poolManager` = `$poolManager`, `address factory` = `$factory`, `address owner` = `$owner` |
 
-`NapToken` is the standard launch token: name "Hamster Nap", symbol "NAP", 18 decimals,
+`NapToken` is the standard launch token: name "Hamster Nap 3D", symbol "NAP", 18 decimals,
 exactly 1,000,000,000 tokens (10^27 minor units) minted once to its deployer, the launch factory.
 No owner, mint, pause, blocklist, fee or upgrade. The brief asks for nothing else of the token;
 the game's fee is the hook's.
 
-`HamsterNapHook` has no owner. It takes no owner argument because the brief forbids owner powers:
-no pause, no upgrade, no signer, no keeper, no withdrawal by anyone but winners. The pot is the
-hook itself (its ETH balance plus any ERC-6909 ETH claims on the PoolManager), exposed through
-`pot()`; there is no third contract.
+`HamsterNap3D` takes an explicit, nonzero owner in its third constructor argument. For this
+launch `$owner` resolves to `0x887b86b6b6957f7bbea88b8cefd392f39236a88c`. The factory and the
+transaction origin acquire no owner rights. The owner's only privileged calls are `setCore`
+and `finalizeCore`; there is no ownership transfer, renunciation, pause, upgrade, fee change or
+pot withdrawal. See **Core replacement and finalization** for the trust this entails.
+
+The pot is the hook itself (its ETH balance plus any ERC-6909 ETH claims on the PoolManager),
+exposed through `pot()`; there is no third deployed helper. Both constructors make no external
+calls. The PoolManager and factory are constructor parameters supplied by the launch services,
+not hardcoded chain addresses. ABI exports are `docs/abi/HamsterNap3D.json` and
+`docs/abi/NapToken.json`.
 
 Pool terms the manifest step writes: native ETH pair (`pairedCurrency` zero), LP fee 12500
 (1.25%), tick spacing 60. The hook accepts any LP fee the factory opens the pool with; it checks
@@ -38,7 +49,7 @@ Permissions, in the OpenZeppelin Wizard's shape:
 ```json
 {
   "hook": "BaseHook",
-  "name": "HamsterNapHook",
+  "name": "HamsterNap3D",
   "pausable": false,
   "currencySettler": false,
   "safeCast": true,
@@ -60,10 +71,13 @@ Permissions, in the OpenZeppelin Wizard's shape:
     "afterAddLiquidityReturnDelta": false,
     "afterRemoveLiquidityReturnDelta": false
   },
-  "access": "none (the brief forbids owner powers)",
+  "access": "ownable",
   "info": { "license": "MIT" }
 }
 ```
+
+The ownership guard is implemented with an immutable owner and exactly two admin methods;
+it does not inherit ownership-transfer or renunciation entry points.
 
 Address flags: `0x20CC` (8396). The hook's address must carry exactly these bits; the deployer
 mines the CREATE2 salt, and the tests mine one the same way.
@@ -86,7 +100,7 @@ longer ships one); it validates the address flags in the constructor and calls n
 
 ## The game
 
-Rules as implemented, with the constants in `HamsterNapHook`:
+Rules as implemented, with the constants in `HamsterNap3D`:
 
 1. **Buy fee.** A buy (ETH in, NAP out; ETH is always `currency0`) pays `FEE_BPS` = 200 basis
    points, 2% of the ETH the buyer really spends, fee included. Exact input: `beforeSwap` reserves
@@ -105,13 +119,14 @@ Rules as implemented, with the constants in `HamsterNapHook`:
    `MIN_QUALIFYING_BUY` = 0.001 ETH makes the transaction's sender wallet, `tx.origin`, the latest
    buyer, as the brief specifies. The input a buyer offered but the pool did not use counts for
    nothing: a 0.001 ETH order that fills for a sliver is a dust buy. Smaller buys still pay the fee
-   into the pot. The buy's SqueekCore round is recorded with it.
+   into the pot. Both its timestamp and the round on the then-active core are recorded.
 3. **Nap.** `NAP_ROUNDS` = 3 consecutive settled rounds with zero work. It begins at its first
    zero-work round `s`. A run of more than three zero-work rounds is one nap and pays once; the
    next nap can only begin after a round with work.
 4. **Winner and pot.** The winner of the nap at `s` is the latest qualifying buyer as of the last
-   buy recorded in a round before `s`. The pot paid is all fees from buys in rounds before `s`
-   that have not been paid out yet. Fees from buys during or after the nap stay for the next
+   buy recorded strictly before `roundStart(s)` on the active core. The pot paid is all fees from
+   buys before that timestamp that have not been paid out yet. Historical round numbers may
+   decrease across core changes, so winner selection binary-searches timestamps, never rounds. Fees from buys during or after the nap stay for the next
    game. If no qualifying buyer existed before `s` (dust only), the nap settles with no payout and
    the pot waits.
 5. **Claim.** `settleNaps(maxPages)` may be called by anyone. It reads `state()` for the certified
@@ -160,53 +175,108 @@ Rules as implemented, with the constants in `HamsterNapHook`:
    `balanceOf(tx.origin) >= 1` on the Sworn registry `0x0da2679000ea5380d1361cc3cca7d4e8c881f766`,
    read live on every buy. On Sepolia and every other chain the check is skipped. Sells always
    work, also when the registry has no code.
-9. **The core is read only at swap and claim time.** Buys read `state()` through a staticcall
-   that tolerates a reverting or codeless core; sells never read it. Constructors read nothing.
+9. **Core reads.** Buys read `state()` through a staticcall that tolerates an unreadable core;
+   sells never read it. Claims also read pages; `setCore` reads old-core progress and the new
+   core's configuration and frontier. Constructors read nothing. Each read is bounded by
+   `CORE_READ_GAS` = 5,000,000 gas and the expected ABI's maximum response size (state: 256 bytes,
+   configuration: 352, a 16-record page: 2,880). Reverts, exhausted read gas, malformed relevant
+   fields or oversized responses count as unreadable. This keeps recovery available if the core
+   is upgraded to broken code. Only the fields this game consumes are used. During migration,
+   each old-core probe additionally requires enough gas to forward its full budget; insufficient
+   caller gas reverts `InsufficientCoreReadGas` and cannot be used to bypass pending naps. Use
+   gas estimation for `setCore`; reserved but unused gas is not spent.
 
 Events: `Buy` for every recorded buy (with the executed gross, the fee and `qualifying`),
 `NapSettled`, `FailsafeTaken`, `PayoutDeferred`, `FeeRefunded`, `OwedWithdrawn`,
-`ClaimsRedeemed`, `FrontierSeen`, `GameStarted`, `PoolBound`.
+`ClaimsRedeemed`, `FrontierSeen`, `GameStarted`, `PoolBound`, `CoreChanged(oldCore, newCore)`,
+`CoreFinalized(core)`. Both core-change addresses and the finalized core are indexed.
 
 Views for the website: `pot()`, `latestBuyer()`, `buyCount()` / `buyAt(i)` (round, timestamp,
 fees through it, latest buyer then), `winnerBefore(napStart)`, `failsafeWinner()`,
 `failsafeOpensAt()`, `failsafeCutoff()`, `scanRound()`, `zeroRun()`, `lastSeenFrontier()`,
-`owed(wallet)`.
+`owed(wallet)`, `core()`, `coreFinalized()`, `owner()`.
+`GENESIS_TIMESTAMP()` and `ROUND_DURATION()` retain their getter names but now read storage.
+`roundAt`, `roundStart` and `roundEnd` are now view functions using that stored timing.
 `decodeRoundPage(bytes)` is a pure helper the hook calls on itself to read the core's pages
 tolerantly; it has no state and nothing to protect.
 
 ### Where the ETH goes
 
 Every wei of fee goes into the pot and leaves it only to a nap winner or the failsafe winner.
-Nothing goes to the owner, the requester, IMD or any other address. The only other ETH the hook
-holds is what it owes back: deferred payouts and partial-fill refunds, both in `owed`. Invariant
+No administrative share goes to the owner, requester or IMD. The owner may receive only ordinary
+winnings or its own owed credit, on the same terms as any buyer. The other ETH the hook holds
+is what it owes back: deferred payouts and partial-fill refunds, both in `owed`. Invariant
 kept by the tests: `hook ETH balance + claimsHeld == pot() + totalOwed`.
 
 ## SqueekCore facts used
 
-Verified on Sepolia on 2026-10-31 at block 12030371 against the live proxy
-`0x980B4424c007CAf7a1f3670B48c8EaEf7EbC3d44` (implementation at
-`0x284747c4664af2203e7a90a2ee76f22b6b5e6889`):
+The approved workflow supplies the initial live Sepolia proxy
+`0xFD6C166D4B8E2962E65746a13e5a0797CD4dE0c4`, followed by the SqueekChain API, and its
+configuration measured on 2026-11-06: genesis **1793735400**, round duration **600 seconds**.
+These three literal initial values are stored by construction, without calling the proxy.
+They were not independently remeasured in this implementation assignment.
 
-- `configuration()`: `genesisTimestamp` 1793022600, `roundDuration` 600, `maxRoundsPerBatch` 16.
-- `state().settledThroughRound` was 642 at timestamp 1793407932, which is round 643 under
-  "round 1 starts at genesis": `round(t) = (t - genesis) / 600 + 1`. The docs say the same.
-- `roundPage(after, through, max)` returns only rounds with work, start exclusive, end
-  inclusive, and reverts with `InvalidRoundPageBounds` on a reversed range, an end past the
-  frontier, or more than 16 records (all three reproduced live). `roundPage(0, 0, 0)` returns the
-  launch position.
-- The published ABI is copied to `docs/abi/SqueekCore.json`; `src/interfaces/ISqueekCore.sol`
-  declares the three reads from it.
+Round 1 starts at genesis: `round(t) = (t - genesis) / duration + 1`, with round 0 before genesis.
+`state().settledThroughRound` is the certified frontier. `roundPage(after, through, max)` is
+start-exclusive, end-inclusive and returns only rounds with work, at most 16 records. A missing
+settled round has zero work; rounds past the frontier are unknown. The interface is
+`src/interfaces/ISqueekCore.sol`, with the published ABI retained in `docs/abi/SqueekCore.json`.
 
-These are constants in the hook (`CORE`, `GENESIS_TIMESTAMP`, `ROUND_DURATION`), as the brief
-requires. If SqueekChain ever changes the core's address, genesis or round length, this hook does
-not follow; the failsafe is the exit.
+The older proxy and the captured work ledger in `test/fixtures/SepoliaRounds.sol` are historical
+regression fixtures, not this launch's dependency. The offline replay preserves that ledger's
+work pattern but uses the new initial genesis. The opt-in archival fork suite uses a test-only
+hook with the old initial literals so the earlier live-ledger assertions remain valid.
+
+## Core replacement and finalization
+
+`setCore(ISqueekCore newCore)` is callable only by the fixed launch owner while
+`coreFinalized()` is false. It:
+
+1. Checks the old core's current frontier (also respecting a higher previously observed one).
+   If the game has started and pending rounds are readable, it reverts with
+   `NapsUnsettled(scanRound, frontier)`. Conservatively, **every readable pending round must be
+   scanned**, including worked rounds with no nap. Anyone can call `settleNaps` in bounded pages
+   before the owner retries. No payout happens inside `setCore`.
+2. Allows recovery if old `state()` or the **next pending page** cannot be read or makes no
+   progress. Unscanned old rounds are dropped. A readable prefix must be processed first with
+   `settleNaps`; a failure in a later page does not erase a payable earlier nap. A failure of the
+   old `configuration()` alone does not waive settlement, because its timing is already cached.
+3. Requires the new `configuration()` and `state()` to be readable, with uint64 genesis,
+   duration and frontier. Zero duration reverts `InvalidRoundDuration`; a maximal uint64
+   frontier reverts `InvalidCoreFrontier` because no next round can be represented. A codeless
+   address or invalid ABI reverts `CoreUnreadable`. Failed switches change nothing.
+4. Stores the core, genesis and duration; starts scanning at `newFrontier + 1`; empties
+   `zeroRun` and `zeroRunStart`; sets `lastSeenFrontier` to the new frontier and
+   `frontierSeenAt` to the switch timestamp; emits `CoreChanged`. The seven-day failsafe restarts
+   from the switch, or the new frontier's end if that is later. Already-settled new-core history
+   is not imported. A switch before the first swap still establishes this scan baseline.
+5. Preserves every buy record, the latest buyer, all fees and paid totals, the pot, native claims,
+   deferred payouts/refunds, nap count and first-game state. New naps select by buy timestamp
+   strictly before their first round's start; a buy before migration can win the first new nap,
+   while a buy exactly at that boundary cannot. Previously paid fees cannot be paid again.
+
+`finalizeCore()` is owner-only and one-way. It emits `CoreFinalized(core)` and permanently
+blocks `setCore`; repeating it also reverts `CoreIsFinalized`. It changes neither the scan nor
+the failsafe clock, balances or trading. Both admin calls share the payout reentrancy lock, so
+an owner who wins cannot change the timeline inside a settlement callback. Read dependencies
+are reached only with static calls. Same-address reconfiguration before finalization is allowed
+and has exactly the same checks and reset behavior as any other switch.
+
+**Trust assumption:** before finalization the owner chooses the source of truth and its timing.
+ABI checks cannot prove that it represents the real hamster. An owner can install a dishonest
+core to influence which recorded buyer wins, drop unreadable history, or repeatedly restart the
+failsafe. There is no direct owner withdrawal, but that does not make core selection harmless.
+The independent review must assess this power first. Finalization freezes this hook's address
+and cached timing, **not** SqueekChain's proxy implementation, reporter or upgrade authority.
+Those remain outside trust assumptions. Sells never consult the core and remain available even
+if it reverts or after finalization; ordinary pool liquidity and slippage conditions still apply.
 
 ## Tests
 
-`forge test` runs 78 tests in five suites (the verifier re-runs them with
-`FOUNDRY_FUZZ_SEED=0xfbaf61498d090e9328f47570cd503c9b9f7a6967092682129c4f05d58ca2d30c`):
+`forge test` runs the original regression suites plus the new migration suite with
+`FOUNDRY_FUZZ_SEED=0x78af848289a6cfdfe3ce352b08b7f4d056e64612920bbac37985ea48ca384cc2`:
 
-- `test/HamsterNapHook.t.sol`: permissions, callback access, initialization from the factory
+- `test/HamsterNap3D.t.sol`: permissions, callback access, initialization from the factory
   only and once, native pair only; fees on exact-input and exact-output buys, no fee on sells,
   dust buys, the 0.001 ETH threshold, `tx.origin` as the buyer; partial fills against a price
   limit (a 0.001 ETH order that fills for dust pays 2% of the executed ETH, gets the rest of its
@@ -234,31 +304,46 @@ not follow; the failsafe is the exit.
   the whole stipend and never more, a wallet that needs 150k gas is credited); a re-entrant
   winner; and a fuzzed ETH accounting run (pot = fees in − payouts) over mixed buys,
   exact-output buys and sells.
-- `test/HamsterNapHook.claims.t.sol`: a fresh PoolManager whose pool was seeded with tokens only:
+- `test/HamsterNap3D.claims.t.sol`: a fresh PoolManager whose pool was seeded with tokens only:
   the first buy's fee becomes an ERC-6909 claim, later fees come as ETH, claims are redeemed by
   anyone, by a nap payout and by the failsafe.
-- `test/HamsterNapHook.sworn.t.sol`: the mainnet-only Sworn check, read live, skipped on Sepolia,
+- `test/HamsterNap3D.sworn.t.sol`: the mainnet-only Sworn check, read live, skipped on Sepolia,
   lifted after the first nap; sells always work.
-- `test/HamsterNapHook.sepolia.t.sol`: the game replayed over real round pages captured from the
+- `test/HamsterNap3D.sepolia.t.sol`: the game replayed over real round pages captured from the
   live core (`test/fixtures/SepoliaRounds.sol`, rounds 483–642): the three real naps at 503, 519
   and 540 are found and paid in order, the single zero-work rounds 498 and 640 are not naps, the
   mock reproduces the captured pages and the documented error cases.
 - `test/NapToken.t.sol`: supply, decimals, a transfer, no mint.
+- `test/HamsterNap3D.core.t.sol`: owner authorization (including factory and origin rejection),
+  literal construction without dependency code, zero-owner rejection, irreversible finalization,
+  backlog settlement, broken/malformed/codeless/gas-burning/oversized core reads, atomic failures,
+  independent configuration and state failures, timing changes, pot/debt/claim/history carryover,
+  buys before a switch winning, exact timestamp boundaries, repeated migrations, seven-day clock
+  restart, unchanged sells and LP collection, and owner reentrancy during payout. The migration
+  winner fuzz test runs 512 cases over round lengths, frontiers and buy sizes.
+- `test/HamsterNap3D.independent.t.sol` and `test/HamsterNap3D.invariant.t.sol` retain the previous
+  contributor's adversarial regression tests and both 256-run, 96-call accounting campaigns.
+  Renaming and updating their default timeline does not constitute an independent review of
+  this change. The new hook and manifest still need their separate review assignments.
+- `test/HamsterNap3D.fork.t.sol` retains five archival tests at Sepolia block 12030457. It skips
+  offline. To opt in, supply an archive endpoint using Foundry's `--fork-url` and
+  `--fork-block-number 12030457` flags with `--match-contract HamsterNap3DForkTest`. Tests read no
+  environment variables. This historical fork does not validate the replacement proxy.
 
-`test/mocks/MockSqueekCore.sol` reproduces the documented read behaviour of the core and can be
-switched to revert or report `paused`. No fork test is included: the task names no RPC and tests
-read no environment variables. A fork run of `test/HamsterNapHook.sepolia.t.sol`'s scenario
-against the live core at block 12030371 is still owed before launch and belongs to the review.
+`test/mocks/MockSqueekCore.sol` models sparse pages, configurable timing/frontiers, pause status
+and independently failing reads. Integration tests deploy a real local Uniswap v4 PoolManager;
+no network is needed for the regular suite. Current-proxy live validation remains an operational
+check for review/deployment, not a claimed result here.
 
-The protected floor tests (`.imd/reads/protected/univ4_hook/*.t.sol`) compile against this tree
-(`src/HookFlags.sol`, `test/mocks/MockERC20.sol`, `test/mocks/Swapper.sol`,
-`test/floor/OwnerChecks.sol`) and passed locally against the built creation code: 13 of 13.
+The supplied protected floor checks are exercised separately in `test/scratch/` against built
+creation code; scratch files are not part of the delivered project. See
+`docs/CORE_MIGRATION.md` for the final validation record and review handoff.
 
 ## Build
 
 ```
 forge build
-forge test
+FOUNDRY_FUZZ_SEED=0x78af848289a6cfdfe3ce352b08b7f4d056e64612920bbac37985ea48ca384cc2 forge test
 forge fmt --check
 ```
 
@@ -273,9 +358,10 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
 - The buyer is `tx.origin`, as the brief specifies. A smart-wallet or relayed buy records the
   relaying EOA. Using `tx.origin` is a known pattern to avoid for authorization; here it only
   decides who the latest buyer is and was a stated requirement.
-- The game starts at the pool's first swap of either direction (the round it happens in is where
-  the nap scan begins). A nap in progress at that moment counts as beginning there and has no
-  winner, which ends the first game.
+- Without an earlier core switch, the game starts at the first swap of either direction; its
+  round is where the scan begins. A nap already in progress counts as beginning there and has
+  no earlier winner. A core switch explicitly resets the scan to the next round after that
+  core's frontier, with an empty zero-work run, even before the first swap.
 - A nap is a maximal run of zero-work rounds; one payout per run. A settled round missing from a
   page is zero work, per the docs. Rounds past the frontier are unknown and are not scanned.
 - Exact-output buys pay a fee equal to 2% of the gross (net × 200 / 9800), so both buy kinds pay
@@ -327,9 +413,10 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
 
 ## Operational responsibilities
 
-- **Nobody runs this contract.** No keys, no admin. After launch the only maintenance calls are
-  permissionless: `settleNaps(maxPages)` when a nap has settled, `redeemClaims()` if claims sit
-  idle, `failsafe()` after seven stale days. The website should offer the first two as buttons.
+- **Owner.** The launch owner alone chooses and finalizes the core. There is no backend, signer
+  or required keeper. All game maintenance remains permissionless: `settleNaps(maxPages)` when
+  a nap has settled, `redeemClaims()` if claims sit idle, `failsafe()` after seven stale days.
+  The site may expose game actions; owner configuration is an operational responsibility.
 - **Gas for claims.** A page costs one `roundPage` call of up to 16 records; `settleNaps(10)`
   covers about a day. After a long idle stretch call it repeatedly; progress is kept.
 - **Winner that cannot receive ETH.** A contract wallet without a payable fallback, or one whose
@@ -346,15 +433,33 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
   fee reservation in `owed` and pulls it with `withdrawOwed()`; it never expires.
 - **Dependency risk.** If SqueekCore pauses or breaks, buys and sells keep working, claims revert
   until it returns, and the failsafe opens after seven days. If it is upgraded with a different
-  read ABI, claims revert and the failsafe is the way out.
+  read ABI, claims revert and the failsafe is the way out unless the owner migrates before
+  finalization. A switch restarts the clock. Review external proxy upgrades separately.
 - **Security.** Tests passing are not an audit. The brief asks for an independent adversarial
   review of the hook and its tests before release; this stage delivers the code and tests only.
 
 ## After launch
 
-Nothing to set: the hook has no owner-settable values. All outside addresses the brief gives
-(the SqueekCore proxy, the Sworn registry) are constants, and the PoolManager and factory come
-from the launch as `$poolManager` and `$factory`.
+- **Core selection:** the initial proxy and timing are already configured from the approved
+  literals. If SqueekChain changes its proxy, the owner obtains the replacement address from
+  SqueekChain's operator and corroborates its `configuration()`, `state()` and `roundPage()` on
+  Sepolia. Verify that it follows the API and the intended hamster; ABI validity is insufficient.
+  Call `settleNaps(maxPages)` repeatedly until caught up, then call `setCore(newCore)` from the
+  owner wallet. If the next read is unavailable, explicitly accept that its unscanned history is
+  dropped. Confirm `CoreChanged`, `core()`, cached timing, the new scan and failsafe opening.
+- **Finalization:** after verifying the operator's final core, the owner calls `finalizeCore()`.
+  Confirm `coreFinalized() == true` and `CoreFinalized`. This cannot be undone; no new owner can
+  be appointed, and a later operator proxy migration will require the game's failsafe or a
+  separate deployment. No deadline or automatic finalization is added.
+- **Deployment services:** prepare and independently review a fresh manifest for `NapToken` and
+  `HamsterNap3D` with constructor arguments in the order above, mine flags `0x20cc`, and perform
+  source publication, attestation, admission and deployment. Keep policy and signed-artifact
+  linkage in those services. No broadcast or existing deployment-address reuse is part of this
+  implementation assignment.
+- **Site integration:** use the new hook ABI and actual deployed addresses after launch; read
+  `core()`, `coreFinalized()` and `owner()`, and show past `CoreChanged` events. Nap round ids may
+  repeat across core changes: associate events with their active core using log ordering rather
+  than treating `napStart` alone as a globally unique id. Historic buy rounds are never rewritten.
 
 ## Changes in the review revisions
 

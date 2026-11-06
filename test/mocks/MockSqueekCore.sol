@@ -14,6 +14,12 @@ contract MockSqueekCore is ISqueekCore {
     bool public reverting;
     bool public pausedFlag;
     mapping(uint64 round => uint64 work) public workOf;
+    bool public customConfiguration;
+    uint64 public genesis;
+    uint64 public duration;
+    bool public stateReverting;
+    bool public configurationReverting;
+    bool public pageReverting;
 
     error Reverting();
 
@@ -40,8 +46,20 @@ contract MockSqueekCore is ISqueekCore {
         pausedFlag = value;
     }
 
+    function setConfiguration(uint64 genesis_, uint64 duration_) external {
+        customConfiguration = true;
+        genesis = genesis_;
+        duration = duration_;
+    }
+
+    function setReadFailures(bool state_, bool configuration_, bool page_) external {
+        stateReverting = state_;
+        configurationReverting = configuration_;
+        pageReverting = page_;
+    }
+
     function state() external view returns (CoreState memory result) {
-        if (reverting) revert Reverting();
+        if (reverting || stateReverting) revert Reverting();
         uint64 cumulative = _cumulativeThrough(frontier);
         result.settledThroughRound = frontier;
         result.cumulativeWork = cumulative;
@@ -53,10 +71,10 @@ contract MockSqueekCore is ISqueekCore {
     }
 
     function configuration() external view returns (CoreConfiguration memory result) {
-        if (reverting) revert Reverting();
+        if (reverting || configurationReverting) revert Reverting();
         result.streamId = 0x52e443e4e0d236ff0c07f4cdc518c594a3d680d20abb1481510efbed0ec73633;
-        result.genesisTimestamp = 1793022600;
-        result.roundDuration = 600;
+        result.genesisTimestamp = customConfiguration ? genesis : 1793735400;
+        result.roundDuration = customConfiguration ? duration : 600;
         result.maxWorkPerRound = 10000;
         result.maxRoundsPerBatch = 16;
         result.initialWorkPerThousandBlocks = 10000;
@@ -70,7 +88,7 @@ contract MockSqueekCore is ISqueekCore {
         view
         returns (RoundPage memory result)
     {
-        if (reverting) revert Reverting();
+        if (reverting || pageReverting) revert Reverting();
         if (afterRound > throughRound || throughRound > frontier || maxRecords > 16) revert InvalidRoundPageBounds();
 
         uint64 cumulative = _cumulativeThrough(afterRound);

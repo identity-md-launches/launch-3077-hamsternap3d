@@ -3,13 +3,13 @@ pragma solidity 0.8.26;
 
 import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/src/libraries/TickMath.sol";
-import {HamsterNapHook} from "src/HamsterNapHook.sol";
+import {HamsterNap3D} from "src/HamsterNap3D.sol";
 import {ISqueekCore} from "src/interfaces/ISqueekCore.sol";
 import {HookTestBase} from "./HookTestBase.sol";
 import {MockSqueekCore} from "./mocks/MockSqueekCore.sol";
 import {RejectingWinner} from "./mocks/RejectingWinner.sol";
 
-contract HamsterNapHookIndependentTest is HookTestBase {
+contract HamsterNap3DIndependentTest is HookTestBase {
     function setUp() public override {
         super.setUp();
         vm.chainId(11155111);
@@ -40,7 +40,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         assertEq(hook.latestBuyer(), bob);
         core.setFrontier(653);
         vm.expectEmit(true, true, false, true, address(hook));
-        emit HamsterNapHook.NapSettled(651, alice, expectedFirst);
+        emit HamsterNap3D.NapSettled(651, alice, expectedFirst);
         assertEq(hook.settleNaps(1), 1);
         assertEq(alice.balance, expectedFirst);
         assertEq(bob.balance, 0);
@@ -49,7 +49,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         core.setWork(654, 1);
         core.setFrontier(657);
         vm.expectEmit(true, true, false, true, address(hook));
-        emit HamsterNapHook.NapSettled(655, bob, expectedNext);
+        emit HamsterNap3D.NapSettled(655, bob, expectedNext);
         assertEq(hook.settleNaps(1), 1);
         assertEq(bob.balance, expectedNext);
         assertEq(hook.pot(), 0);
@@ -94,7 +94,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         vm.mockCallRevert(address(core), pageTwo, abi.encodeWithSelector(MockSqueekCore.Reverting.selector));
         // A later unreadable page reverts the whole claim, so the nap found on page one is not paid
         // and the scan does not move past it.
-        vm.expectRevert(HamsterNapHook.CoreUnreadable.selector);
+        vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
         hook.settleNaps(2);
         assertEq(hook.scanRound(), 650);
         assertEq(hook.zeroRun(), 0);
@@ -121,7 +121,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         assertEq(hook.zeroRun(), 2);
         core.setFrontier(656);
         vm.expectEmit(true, true, false, true, address(hook));
-        emit HamsterNapHook.NapSettled(654, alice, 0.02 ether);
+        emit HamsterNap3D.NapSettled(654, alice, 0.02 ether);
         assertEq(hook.settleNaps(1), 1);
         assertEq(alice.balance, 0.02 ether);
     }
@@ -163,20 +163,20 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         assertEq(hook.settleNaps(1), 3);
         assertEq(hook.owed(address(winner)), 0.06 ether);
         assertEq(bob.balance, 0.08 ether, "deferred debts must not block later winners");
-        vm.expectRevert(HamsterNapHook.TransferFailed.selector);
+        vm.expectRevert(HamsterNap3D.TransferFailed.selector);
         winner.withdrawFrom(address(hook));
         assertEq(hook.owed(address(winner)), 0.06 ether);
         assertEq(hook.totalOwed(), 0.06 ether);
         vm.prank(carol);
-        vm.expectRevert(HamsterNapHook.NothingOwed.selector);
+        vm.expectRevert(HamsterNap3D.NothingOwed.selector);
         hook.withdrawOwed();
         assertEq(hook.owed(address(winner)), 0.06 ether);
         winner.setAccepting(true);
         vm.expectEmit(true, false, false, true, address(hook));
-        emit HamsterNapHook.OwedWithdrawn(address(winner), 0.06 ether);
+        emit HamsterNap3D.OwedWithdrawn(address(winner), 0.06 ether);
         winner.withdrawFrom(address(hook));
         assertEq(address(winner).balance, 0.06 ether);
-        vm.expectRevert(HamsterNapHook.NothingOwed.selector);
+        vm.expectRevert(HamsterNap3D.NothingOwed.selector);
         winner.withdrawFrom(address(hook));
         assertEq(hook.totalOwed(), 0);
         assertBacked();
@@ -200,7 +200,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         assertEq(hook.pot(), 0);
         assertEq(hook.totalOwed(), 0.02 ether);
         assertEq(address(hook).balance, 0.02 ether);
-        vm.expectRevert(HamsterNapHook.NothingToPay.selector);
+        vm.expectRevert(HamsterNap3D.NothingToPay.selector);
         hook.failsafe();
         winner.setAccepting(true);
         winner.withdrawFrom(address(hook));
@@ -324,7 +324,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         uint256 refund = hook.owed(address(origin));
         assertGt(refund, 0.019 ether);
         assertEq(hook.latestBuyer(), alice);
-        vm.expectRevert(HamsterNapHook.TransferFailed.selector);
+        vm.expectRevert(HamsterNap3D.TransferFailed.selector);
         origin.withdrawFrom(address(hook));
         core.setWork(650, 1);
         core.setFrontier(653);
@@ -356,16 +356,16 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         uint256 opensAt = block.timestamp + 7 days;
         assertEq(hook.frontierSeenAt(), block.timestamp);
         assertEq(hook.failsafeOpensAt(), opensAt);
-        vm.expectRevert(abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, opensAt));
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, opensAt));
         hook.failsafe();
         // The core stalls and starts reverting: the last sighting still dates the failsafe.
         core.setReverting(true);
         vm.warp(opensAt - 1);
-        vm.expectRevert(abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, opensAt));
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, opensAt));
         hook.failsafe();
         vm.warp(opensAt);
         vm.expectEmit(true, false, false, true, address(hook));
-        emit HamsterNapHook.FailsafeTaken(bob, 0.04 ether, 660);
+        emit HamsterNap3D.FailsafeTaken(bob, 0.04 ether, 660);
         hook.failsafe();
         assertEq(bob.balance, 0.04 ether);
         assertEq(alice.balance, 0.02 ether, "the settled nap is not paid again");
@@ -400,13 +400,13 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         uint256 opensAt = hook.failsafeOpensAt();
         assertEq(opensAt, block.timestamp + 7 days);
         vm.warp(opensAt - 1);
-        vm.expectRevert(abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, opensAt));
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, opensAt));
         hook.failsafe();
         vm.warp(opensAt);
         vm.expectEmit(true, true, false, true, address(hook));
-        emit HamsterNapHook.NapSettled(651, alice, 0.02 ether);
+        emit HamsterNap3D.NapSettled(651, alice, 0.02 ether);
         vm.expectEmit(true, false, false, true, address(hook));
-        emit HamsterNapHook.FailsafeTaken(bob, 0.04 ether, 680);
+        emit HamsterNap3D.FailsafeTaken(bob, 0.04 ether, 680);
         vm.prank(carol);
         hook.failsafe();
         assertEq(alice.balance, 0.02 ether, "the certified nap's pot went to its own winner");
@@ -435,7 +435,7 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         vm.warp(opensAt - early);
         buy(bob, 0.001 ether);
         vm.warp(opensAt - 1);
-        vm.expectRevert(abi.encodeWithSelector(HamsterNapHook.CoreNotStale.selector, opensAt));
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, opensAt));
         hook.failsafe();
         vm.warp(opensAt + late);
         uint256 lateAt = block.timestamp;
@@ -449,13 +449,13 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         assertEq(bob.balance, early_);
         assertEq(dave.balance, 0, "a buy in front of the call takes nothing");
         assertEq(hook.pot(), fee(lateEth), "the late fee waits in the pot");
-        vm.expectRevert(HamsterNapHook.NothingToPay.selector);
+        vm.expectRevert(HamsterNap3D.NothingToPay.selector);
         hook.failsafe();
         // Exactly seven days after the late buy it is not yet strictly before the cutoff.
         vm.warp(lateAt + 7 days);
         (winner, amount) = hook.failsafeWinner();
         assertEq(amount, 0);
-        vm.expectRevert(HamsterNapHook.NothingToPay.selector);
+        vm.expectRevert(HamsterNap3D.NothingToPay.selector);
         hook.failsafe();
         vm.warp(lateAt + 7 days + 1);
         (winner, amount) = hook.failsafeWinner();
@@ -478,12 +478,12 @@ contract HamsterNapHookIndependentTest is HookTestBase {
         core.setReverting(true);
         uint256 opensAt = hook.failsafeOpensAt();
         vm.warp(opensAt + 1);
-        vm.expectRevert(HamsterNapHook.NoQualifyingBuyer.selector);
+        vm.expectRevert(HamsterNap3D.NoQualifyingBuyer.selector);
         hook.failsafe();
         buy(bob, 1 ether);
         uint256 boughtAt = block.timestamp;
         vm.warp(boughtAt + 7 days);
-        vm.expectRevert(HamsterNapHook.NoQualifyingBuyer.selector);
+        vm.expectRevert(HamsterNap3D.NoQualifyingBuyer.selector);
         hook.failsafe();
         vm.warp(boughtAt + 7 days + 1);
         hook.failsafe();
