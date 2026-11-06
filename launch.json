@@ -1,10 +1,11 @@
 {
   "kind": "univ4_hook",
   "hook": {
-    "contract": "HamsterNapHook",
+    "contract": "HamsterNap3D",
     "constructorArgs": [
       "$poolManager",
-      "$factory"
+      "$factory",
+      "$owner"
     ],
     "permissions": [
       "beforeInitialize",
@@ -16,7 +17,7 @@
   },
   "token": {
     "contract": "NapToken",
-    "name": "Hamster Nap",
+    "name": "Hamster Nap 3D",
     "symbol": "NAP",
     "decimals": 18
   },
@@ -26,5 +27,5 @@
     "tickSpacing": 60,
     "initialPrice": "79228162514264337593543950336"
   },
-  "notes": "Hamster Nap (NAP) on Sepolia. The hook constructor takes the PoolManager and launch factory in that order and reads no external contracts. beforeInitialize accepts only the factory via PoolManager, binds one native-ETH pool and learns its token from PoolKey.currency1. NapToken has no constructor arguments. Neither contract has owner, pause or upgrade powers. Buys charge a 2% game fee on executed gross ETH, separate from the pool's 1.25% LP fee; sells pay no game fee and never read SqueekCore. Buys spending at least 0.001 ETH record tx.origin as the latest qualifying buyer; smaller buys still contribute fees. The fixed SqueekCore proxy is 0x980b4424c007caf7a1f3670b48c8eaef7ebc3d44, with genesis 1793022600 and 600-second rounds. Three consecutive settled zero-work rounds form a nap. Anyone can call settleNaps to process naps in order, paying fees collected before each nap's start to the last qualifying buyer before that start; later fees remain for later games. A continuous zero-work run pays once. Fees become ERC-6909 ETH claims if PoolManager lacks ETH, redeemable through redeemClaims or before payout. Payouts give the winner 100000 gas; failed winner transfers and unused partial-fill fee reservations become withdrawOwed credits. settleNaps reverts with CoreUnreadable when the core cannot be read. The seven-day failsafe opens once the core's frontier has stood still for 7 days, measured from the later of the last observed frontier advance (initially game start) and the frontier round's end. It first settles every nap the core certified before stalling (up to 8 pages, else it reverts with NapsUnsettled until settleNaps catches up), then pays the last qualifying buyer whose buy preceded the failsafe cutoff (the later of the opening and seven days ago) the unpaid fees collected through that buy; later fees stay in the pot until they are themselves seven days old. The first-game Sworn check applies only on mainnet and is skipped on Sepolia. pool.initialPrice records the required reference value; the deployer derives the actual opening price from the launch policy."
+  "notes": "Hamster Nap 3D (NAP) on Sepolia. HamsterNap3D takes $poolManager, $factory and $owner in that declaration order. NapToken has no constructor arguments. Both constructors read no external contracts. Only PoolManager may invoke the enabled callbacks; beforeInitialize accepts only the launch factory as sender, binds one native-ETH pool and learns the token from PoolKey.currency1. The hook accepts the listed 12500 LP fee and tick spacing 60. Buys charge a 2% game fee on executed gross ETH, separate from the pool's 1.25% LP fee; sells pay no game fee and never read SqueekCore. Buys spending at least 0.001 ETH record tx.origin as the latest qualifying buyer; smaller buys still contribute fees. Three consecutive settled zero-work rounds form a nap. Anyone can call settleNaps to process naps in order, paying unpaid fees collected before each nap's start to the last qualifying buyer before that start. A continuous zero-work run pays once. Fees become ERC-6909 ETH claims if PoolManager lacks ETH, redeemable through redeemClaims or before payout. Failed winner transfers and unused partial-fill fee reservations become withdrawOwed credits. The initial core is 0xfd6c166d4b8e2962e65746a13e5a0797cd4de0c4, with genesis 1793735400 and 600-second rounds, stored as literals. The immutable owner's only administrative powers are setCore and finalizeCore. Before finalization, setCore requires readable pending old-core rounds to be scanned with settleNaps first; if old state or the next pending page is unreadable, unscanned history is dropped. The new configuration and frontier must be readable and the round duration nonzero. A switch preserves the pot, debts, latest buyer and buy history, starts scanning after the new frontier, clears the zero-work run and restarts the seven-day failsafe clock. Winner eligibility uses buy timestamps against the active core's nap start. CoreChanged records switches; CoreFinalized records permanent finalization. Until finalized, core selection can affect winners and repeated switches can delay the failsafe. Finalization fixes this hook's core address and cached timing, but cannot freeze the external proxy's upgrades or reporting. There is no owner fee, administrative withdrawal, ownership transfer, pause or hook upgrade. The failsafe opens seven days after the later of the last observed frontier advance (initially game start, reset on migration) and that frontier round's end. It processes readable certified naps first, requiring settleNaps to catch up if more than eight pages remain, then pays unpaid fees through the last buy before its cutoff to that record's latest qualifying buyer. The cutoff is the later of failsafe opening and seven days ago. The Sworn check applies only to the first game on mainnet and is skipped on Sepolia. pool.initialPrice is the required reference value; the deployer derives the actual opening price from the launch policy's opening market cap and token address."
 }
