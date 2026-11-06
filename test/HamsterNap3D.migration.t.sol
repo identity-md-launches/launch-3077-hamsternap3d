@@ -18,7 +18,8 @@ contract HamsterNap3DMigrationTest is HookTestBase {
         seedBothSides(1_000_000 ether);
         core.setFrontier(649);
         next = new MockSqueekCore();
-        next.setConfiguration(uint64(vm.getBlockTimestamp() + 1), 60);
+        // A replacement timeline must already be running: genesis at the switch is the latest allowed.
+        next.setConfiguration(uint64(vm.getBlockTimestamp()), 60);
     }
 
     /// forge-config: default.fuzz.runs = 1000
@@ -205,7 +206,8 @@ contract HamsterNap3DMigrationTest is HookTestBase {
         core.setWork(654, 1);
         core.setFrontier(657);
         core.setReadFailures(false, false, true);
-        next.setConfiguration(uint64(vm.getBlockTimestamp() + 1), 31);
+        vm.warp(vm.getBlockTimestamp() + 1); // Bob's buy strictly precedes the new genesis.
+        next.setConfiguration(uint64(vm.getBlockTimestamp()), 31);
         _switch(next);
         assertEq(hook.napsSettled(), 1);
         assertEq(hook.owed(address(receiver)), 0.02 ether);
@@ -256,7 +258,8 @@ contract HamsterNap3DMigrationTest is HookTestBase {
         uint256 dust = bound(dustSeed, 50, 0.001 ether - 1);
         uint64 duration = uint64(bound(durationSeed, 1, 3600));
         buy(alice, early);
-        next.setConfiguration(uint64(vm.getBlockTimestamp() + 1), duration);
+        vm.warp(vm.getBlockTimestamp() + 1); // Alice's buy strictly precedes the new genesis.
+        next.setConfiguration(uint64(vm.getBlockTimestamp()), duration);
         _switch(next);
         vm.warp(hook.roundStart(1));
         buy(bob, middle); // Exact boundary: excluded from this nap.
@@ -266,12 +269,15 @@ contract HamsterNap3DMigrationTest is HookTestBase {
         assertEq(alice.balance, early / 50);
         assertEq(bob.balance, 0);
         MockSqueekCore third = new MockSqueekCore();
-        third.setConfiguration(uint64(vm.getBlockTimestamp() + 1 - 100 * 31), 31);
+        buy(carol, dust); // Nonqualifying fee belongs to Bob's next eligible prize.
+        uint64 carolRound = hook.roundAt(vm.getBlockTimestamp());
+        vm.warp(vm.getBlockTimestamp() + 1);
+        // Round 100 ends exactly at the switch: the latest frontier a running timeline may report.
+        third.setConfiguration(uint64(vm.getBlockTimestamp() - 100 * 31), 31);
         third.setFrontier(100);
         _switch(third);
-        buy(carol, dust); // Nonqualifying fee belongs to Bob's next eligible prize.
-        vm.warp(hook.roundStart(101));
-        buy(dave, 1 ether);
+        assertEq(hook.roundStart(101), vm.getBlockTimestamp());
+        buy(dave, 1 ether); // Exact boundary of the next nap: excluded from it.
         vm.prank(owner);
         hook.finalizeCore();
         third.setFrontier(103);
@@ -288,7 +294,7 @@ contract HamsterNap3DMigrationTest is HookTestBase {
         assertEq(dave.balance, 0.02 ether);
         assertEq(hook.buyAt(0).round, 650);
         assertEq(hook.buyAt(1).round, 1);
-        assertEq(hook.buyAt(2).round, 100);
+        assertEq(hook.buyAt(2).round, carolRound);
         assertEq(hook.buyAt(3).round, 101);
         assertEq(hook.buyCount(), 4);
         assertEq(hook.settleNaps(10), 0);
@@ -386,7 +392,8 @@ contract HamsterNap3DMigrationClaimsTest is HookTestBase {
         assertGt(refund, 0, "partial fill must create refundable debt");
         assertEq(hook.latestBuyer(), alice, "partial dust fill does not qualify");
         MockSqueekCore candidate = new MockSqueekCore();
-        candidate.setConfiguration(uint64(vm.getBlockTimestamp() + 1), 60);
+        vm.warp(vm.getBlockTimestamp() + 1); // Alice's buy strictly precedes the new genesis.
+        candidate.setConfiguration(uint64(vm.getBlockTimestamp()), 60);
         candidate.setReadFailures(true, false, false);
         vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
         vm.prank(owner);

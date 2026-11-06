@@ -126,8 +126,7 @@ contract CoreMigrationHandler is Test {
             vm.expectRevert(HamsterNap3D.CoreIsFinalized.selector);
             finalizedRefusals++;
         } else if (_readableBacklog()) {
-            uint64 frontier = active.frontier() > seen ? active.frontier() : seen;
-            vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.NapsUnsettled.selector, cursor, frontier));
+            vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.NapsUnsettled.selector, cursor, _backlogFrontier()));
             blockedMigrations++;
         } else if (fault != 0) {
             vm.expectRevert(
@@ -165,16 +164,19 @@ contract CoreMigrationHandler is Test {
         hook.finalizeCore();
     }
 
+    /// @dev With `state()` unreadable the hook falls back to the last credible frontier it saw, so
+    /// rounds it already saw certified stay payable while pages still answer.
     function settle(uint8 pagesSeed) external {
         uint256 pages = bound(pagesSeed, 1, 3);
-        if (_stateUnavailable() || (cursor <= active.frontier() && _pageUnavailable())) {
+        uint64 bound_ = _stateUnavailable() ? seen : active.frontier();
+        if ((_stateUnavailable() && cursor > seen) || (cursor <= bound_ && _pageUnavailable())) {
             vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
             hook.settleNaps(pages);
             return;
         }
         uint256 beforeNaps = naps;
-        _scan(pages * 16);
         _observe();
+        _scan(pages * 16, bound_);
         assertEq(hook.settleNaps(pages), naps - beforeNaps, "independent nap count");
     }
 
@@ -238,6 +240,7 @@ contract CoreMigrationHandler is Test {
         assertEq(hook.lastSeenFrontier(), seen, "epoch frontier");
         assertEq(hook.frontierSeenAt(), seenAt, "failsafe restart and observations");
         assertEq(hook.failsafeOpensAt(), _opening(), "independent failsafe clock");
+        assertEq(hook.pageFailureSeenAt(), 0, "outage probes never record a page failure");
         assertEq(hook.latestBuyer(), latest, "latest qualifying buyer survives migration");
         assertEq(hook.cumulativeFees(), fees, "sum of independently calculated fees");
         assertEq(hook.cumulativePaid(), paid, "only allocated fees are paid");
@@ -268,9 +271,13 @@ contract CoreMigrationHandler is Test {
         assertEq(administrator.balance, 0, "administration has no direct payout");
     }
 
+    function _backlogFrontier() private view returns (uint64) {
+        return !_stateUnavailable() && active.frontier() > seen ? active.frontier() : seen;
+    }
+
+    /// @dev An unreadable `state()` no longer excuses the probe: the last seen frontier bounds it.
     function _readableBacklog() private view returns (bool) {
-        uint64 frontier = active.frontier() > seen ? active.frontier() : seen;
-        return !_stateUnavailable() && !_pageUnavailable() && cursor <= frontier;
+        return !_pageUnavailable() && cursor <= _backlogFrontier();
     }
 
     function _stateUnavailable() private view returns (bool) {
@@ -293,8 +300,8 @@ contract CoreMigrationHandler is Test {
         return (seenAt > end ? seenAt : end) + 7 days;
     }
 
-    function _scan(uint256 maxRounds) private {
-        for (uint256 i; i < maxRounds && cursor <= active.frontier(); i++) {
+    function _scan(uint256 maxRounds, uint64 through) private {
+        for (uint256 i; i < maxRounds && cursor <= through; i++) {
             if (active.workOf(cursor) != 0) {
                 zeros = 0;
             } else {
