@@ -11,6 +11,9 @@ import {BalanceDelta} from "v4-core/src/types/BalanceDelta.sol";
 
 contract HamsterNap3DCoreTest is HookTestBase {
     MockSqueekCore internal replacement;
+    /// @dev The first second of the replacement's round 8: its frontier round 7 has ended from here,
+    /// so a switch to it is accepted. `_switch` moves the clock forward to it when needed.
+    uint256 internal replacementReady;
 
     function setUp() public override {
         super.setUp();
@@ -18,7 +21,8 @@ contract HamsterNap3DCoreTest is HookTestBase {
         core.setFrontier(649);
         replacement = new MockSqueekCore();
         // A different timeline: the new core's round 8 starts 43 seconds after setUp.
-        replacement.setConfiguration(uint64(roundStart(650) + 60 - 7 * 120), 120);
+        replacementReady = roundStart(650) + 60;
+        replacement.setConfiguration(uint64(replacementReady - 7 * 120), 120);
         replacement.setFrontier(7);
     }
 
@@ -101,13 +105,17 @@ contract HamsterNap3DCoreTest is HookTestBase {
     }
 
     function test_switchBeforeFirstSwapUsesNewFrontierAndEmitsEvent() public {
+        _readyReplacement();
         uint256 switchedAt = vm.getBlockTimestamp();
+        assertEq(switchedAt, hook.GENESIS_TIMESTAMP() + 649 * 600 + 60, "round 650 of the old timing");
         vm.expectEmit(true, true, false, true, address(hook));
         emit HamsterNap3D.CoreChanged(address(core), address(replacement));
         _switch();
         assertEq(hook.scanRound(), 8);
         assertEq(hook.lastSeenFrontier(), 7);
         assertEq(hook.frontierSeenAt(), switchedAt);
+        assertEq(hook.pageFailureSeenAt(), 0);
+        assertEq(hook.failsafeOpensAt(), switchedAt + 7 days);
         assertEq(hook.zeroRun(), 0);
         assertEq(hook.zeroRunStart(), 0);
         assertEq(hook.ROUND_DURATION(), 120);
@@ -169,10 +177,12 @@ contract HamsterNap3DCoreTest is HookTestBase {
         assertEq(hook.zeroRun(), 0);
         assertEq(hook.zeroRunStart(), 0);
         replacement.setFrontier(9);
+        vm.warp(hook.roundEnd(9));
         assertEq(hook.settleNaps(1), 0);
         assertEq(hook.zeroRun(), 2);
         assertEq(hook.zeroRunStart(), 8);
         replacement.setFrontier(10);
+        vm.warp(hook.roundEnd(10));
         assertEq(hook.settleNaps(1), 1);
         assertEq(alice.balance, 0.02 ether);
         assertBacked();
@@ -252,6 +262,7 @@ contract HamsterNap3DCoreTest is HookTestBase {
 
     function test_regressingStateCannotHidePreviouslyObservedReadableNap() public {
         _pendingNap();
+        vm.warp(roundEnd(653));
         buy(bob, 0.0001 ether); // observes the old core's frontier 653
         ISqueekCore.CoreState memory state;
         state.settledThroughRound = 649;
@@ -267,6 +278,7 @@ contract HamsterNap3DCoreTest is HookTestBase {
     function test_oldCoreBurningReadGasCannotPreventRecovery() public {
         _pendingNap();
         vm.etch(address(core), address(new GasBurnCore()).code);
+        _readyReplacement();
         vm.prank(owner);
         hook.setCore{gas: 20_000_000}(replacement);
         assertEq(address(hook.core()), address(replacement));
@@ -304,6 +316,7 @@ contract HamsterNap3DCoreTest is HookTestBase {
     function test_oldCoreReturningOversizedDataCannotPreventRecovery() public {
         _pendingNap();
         vm.etch(address(core), address(new OversizedCore()).code);
+        _readyReplacement();
         vm.prank(owner);
         hook.setCore{gas: 20_000_000}(replacement);
         assertEq(address(hook.core()), address(replacement));
@@ -452,16 +465,17 @@ contract HamsterNap3DCoreTest is HookTestBase {
     function test_switchAgainAndFinalizeDoNotResetClockOrRecordsUnexpectedly() public {
         buy(alice, 1 ether);
         _switch();
-        vm.warp(hook.roundStart(8) - 1);
-        buy(bob, 2 ether);
+        buy(bob, 2 ether); // in the replacement's round 8
+        vm.warp(vm.getBlockTimestamp() + 1);
         MockSqueekCore third = new MockSqueekCore();
-        third.setConfiguration(uint64(vm.getBlockTimestamp() - 20 * 31 + 1), 31);
+        // The third core's round 21 starts exactly now: its frontier round 20 has just ended.
+        third.setConfiguration(uint64(vm.getBlockTimestamp() - 20 * 31), 31);
         third.setFrontier(20);
         vm.prank(owner);
         hook.setCore(third);
         uint256 switchedAt = hook.frontierSeenAt();
-        vm.warp(hook.roundStart(21));
-        buy(carol, 4 ether);
+        assertEq(switchedAt, hook.roundStart(21));
+        buy(carol, 4 ether); // at the first second of round 21: excluded from a nap starting there
         vm.prank(owner);
         hook.finalizeCore();
         assertEq(hook.frontierSeenAt(), switchedAt);
@@ -573,10 +587,11 @@ contract HamsterNap3DCoreTest is HookTestBase {
         uint256 duringGross = bound(duringSeed, 0.001 ether, 10 ether);
         buy(alice, beforeGross);
         uint256 boundary = vm.getBlockTimestamp() + 100;
+        // The new core's round `frontier + 1` starts at the boundary; the switch happens right then.
         replacement.setConfiguration(uint64(boundary - uint256(frontier) * duration), duration);
         replacement.setFrontier(frontier);
-        _switch();
         vm.warp(boundary);
+        _switch();
         buy(bob, duringGross);
         replacement.setFrontier(frontier + 3);
         vm.warp(boundary + uint256(duration) * 3);
@@ -594,8 +609,14 @@ contract HamsterNap3DCoreTest is HookTestBase {
     }
 
     function _switch() internal {
+        _readyReplacement();
         vm.prank(owner);
         hook.setCore(replacement);
+    }
+
+    /// @dev A switch is only valid once the replacement's frontier round has ended.
+    function _readyReplacement() internal {
+        if (vm.getBlockTimestamp() < replacementReady) vm.warp(replacementReady);
     }
 
     function _pendingNap() internal {
@@ -663,8 +684,9 @@ contract HamsterNap3DCoreClaimsTest is HookTestBase {
         assertEq(address(manager).balance, 0);
         buy(alice, 1 ether);
         assertEq(hook.claimsHeld(), 0.02 ether);
+        vm.warp(vm.getBlockTimestamp() + 1);
         MockSqueekCore replacement = new MockSqueekCore();
-        replacement.setConfiguration(uint64(vm.getBlockTimestamp() + 1), 31);
+        replacement.setConfiguration(uint64(vm.getBlockTimestamp()), 31); // genesis now, frontier 0
         vm.prank(owner);
         hook.setCore(replacement);
         assertEq(hook.claimsHeld(), 0.02 ether);

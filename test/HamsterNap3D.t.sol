@@ -851,26 +851,41 @@ contract HamsterNap3DTest is HookTestBase {
     }
 
     function test_settleNapsRevertsWhenTheCoreCannotBeRead() public {
+        uint256 gameStart = block.timestamp;
         buy(alice, 1 ether);
         core.setReverting(true);
         vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
         hook.settleNaps(1);
         core.setReverting(false);
-        // A core whose state reads but whose pages no longer decode: claims revert, the failsafe
-        // treats the backlog as unreadable.
+        // A core whose state reads but whose pages no longer decode: claims revert. The frontier it
+        // reports keeps the frontier clock fresh, so the failsafe call that finds the shut clock and
+        // the unreadable page records the failure and returns; the page clock opens it a week later.
         vm.etch(address(core), address(new HalfReadableCore()).code);
+        vm.warp(roundEnd(653));
         vm.expectRevert(HamsterNap3D.CoreUnreadable.selector);
         hook.settleNaps(1);
         assertEq(hook.lastSeenFrontier(), 649, "the reverted claim recorded nothing");
-        vm.warp(hook.failsafeOpensAt() + 7 days); // the frontier 653 this call sees restarts the clock
-        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, block.timestamp + 7 days));
+        uint256 noticedAt = block.timestamp;
+        vm.expectEmit(false, false, false, true);
+        emit HamsterNap3D.PageFailureSeen(650, 653, noticedAt + 7 days);
         hook.failsafe();
-        buy(bob, 0.001 ether); // records the sighting of 653 the reverted call could not keep
-        assertEq(hook.lastSeenFrontier(), 653);
-        vm.warp(hook.failsafeOpensAt());
+        assertEq(hook.pageFailureSeenAt(), noticedAt);
+        assertEq(hook.lastSeenFrontier(), 653, "the recording call kept the sighting");
+        assertEq(hook.frontierSeenAt(), noticedAt);
+        assertEq(hook.failsafeOpensAt(), noticedAt + 7 days);
+        assertEq(alice.balance, 0);
+        assertEq(hook.pot(), fee(1 ether));
+        vm.warp(noticedAt + 7 days - 1);
+        vm.expectRevert(abi.encodeWithSelector(HamsterNap3D.CoreNotStale.selector, noticedAt + 7 days));
         hook.failsafe();
-        assertEq(bob.balance, fee(1.001 ether));
-        assertEq(hook.napsSettled(), 0);
+        vm.warp(noticedAt + 7 days);
+        vm.expectEmit(true, false, false, true);
+        emit HamsterNap3D.FailsafeTaken(alice, fee(1 ether), 653);
+        hook.failsafe();
+        assertEq(alice.balance, fee(1 ether));
+        assertEq(hook.napsSettled(), 0, "nothing behind the frontier could be certified");
+        assertEq(hook.scanRound(), 650);
+        assertGt(block.timestamp, gameStart + 7 days);
         assertBacked();
     }
 

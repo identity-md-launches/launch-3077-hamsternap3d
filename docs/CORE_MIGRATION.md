@@ -45,9 +45,11 @@ The authoritative exports are [HamsterNap3D.json](abi/HamsterNap3D.json) and
 | `GENESIS_TIMESTAMP()`, `ROUND_DURATION()` | Existing getter names, now storage reads |
 | `roundAt`, `roundStart`, `roundEnd` | Now `view`, using the cached current-core timing |
 | `CORE_READ_GAS()` | Fixed per-read budget of 5,000,000 gas |
+| `pageFailureSeenAt() -> uint256` | When `failsafe()` first found the frontier readable but the next page unreadable; 0 while none stands |
+| `PageFailureSeen(uint64 scanRound, uint64 frontier, uint256 failsafeOpensAt)` | That record, emitted by the non-reverting `failsafe()` call that made it |
 
 New errors: `NotOwner`, `InvalidOwner`, `CoreIsFinalized`, `InvalidRoundDuration`,
-`InvalidCoreFrontier`, and `InsufficientCoreReadGas`. Migration also uses the existing `CoreUnreadable`, `NapsUnsettled`
+`InvalidCoreFrontier`, `InvalidGenesis`, and `InsufficientCoreReadGas`. Migration also uses the existing `CoreUnreadable`, `NapsUnsettled`
 and `Reentrancy` errors. No data is returned by either administrator call.
 
 `BuyRecord` retains its original shape. Its `round` is historical, while its `time` orders all
@@ -60,22 +62,40 @@ round ids can repeat on another core.
 
 A switch leaves fee accounting, the pot, latest buyer, every buy, ERC-6909 claims, refund and
 winner debts, nap count, and first-game state intact. It replaces the core and cached timing,
-sets the scan to `newFrontier + 1`, clears the zero-work run, and dates the frontier observation
-at the switch. The failsafe cannot open before seven days after that observation; a frontier
-whose end is later keeps the existing conservative later-end rule.
+sets the scan to `newFrontier + 1`, clears the zero-work run and any recorded page failure, and
+dates the frontier observation at the switch. The failsafe cannot open before seven days after
+that observation, and the new frontier's round has ended by then (see below), so the switch is
+the date.
 
 Once the scan has started, readable old-core history must be processed with `settleNaps`; this conservatively
 includes pending worked rounds. The switch probes the next pending page and refuses while
-that page can make progress. If a later page is unreadable, the readable prefix must first be
-settled using smaller page batches. If state or the next required page is unreadable, the
-remaining old history is dropped, as requested. Failure of the old configuration alone does
-not bypass settlement, since its timing is already cached.
+that page can make progress. The frontier that bounds the probe is the one old `state()`
+reports now or, if that cannot be read, the last credible frontier the hook saw
+(`lastSeenFrontier`): a broken `state()` alone never drops a nap the hook saw certified while
+`roundPage` still answers. If a later page is unreadable, the readable prefix must first be
+settled using smaller page batches. Only when the next required page is unreadable (or
+certifies nothing) is the remaining old history dropped, as requested. Failure of the old
+configuration alone does not bypass settlement, since its timing is already cached.
 
-The new configuration and frontier must be readable. A zero duration, fields outside uint64,
-invalid response sizes or a frontier of uint64 max are rejected. A failed switch rolls back
-completely. The new core's page history is not imported or paid; the first scanned round is
-strictly after its supplied frontier. Choosing the same address is permitted before finalization
-and uses the same validation and reset rules.
+The new configuration and frontier must be readable, and the new timeline must already be
+running: a genesis after the current block reverts `InvalidGenesis`, and a frontier whose
+round has not ended yet in the new timing (genesis + frontier × duration after the current
+block) reverts `InvalidCoreFrontier`, as does a frontier of uint64 max. No honest core has
+settled a round that is not over, and a future timeline would postpone the failsafe (with a
+genesis a century ahead, by a century). The boundary second, genesis + frontier × duration
+equal to the block timestamp, is accepted. A zero duration, fields outside uint64 and invalid
+response sizes are rejected. A failed switch rolls back completely. The new core's page history
+is not imported or paid; the first scanned round is strictly after its supplied frontier.
+Choosing the same address is permitted before finalization and uses the same validation and
+reset rules.
+
+Outside migration, two further rules protect the failsafe from a core that half works. A
+frontier `state()` reports for a round that has not ended (at or past the running round) is
+ignored, never clamped, so a misreporting core cannot keep the failsafe shut or push it out. And
+a `failsafe()` call that finds the clock shut, `state()` readable and the next unscanned page
+unreadable records the moment (`pageFailureSeenAt`, `PageFailureSeen`) and returns; the
+failsafe then opens seven days later unless a scan reads a page first, so a core that keeps
+reporting progress nobody can verify cannot freeze the pot after finalization.
 
 Core reads use static calls, bounded gas and bounded return-data copying. The caps are 256 bytes
 for state, 352 for configuration and 2,880 for a page with 16 five-word checkpoints. These bounds
@@ -101,11 +121,14 @@ The existing 2% buy fee, partial-fill refund, native-claim fallback and payout b
 ## Owner trust and independent review
 
 The first review question is the owner's influence over the source of truth. Before finalization,
-its key can select a dishonest core with a plausible ABI, choose a different timeline, discard
-unreadable rounds, or repeatedly restart the failsafe. That can affect winners and liveness.
-There is no owner withdrawal or direct fee share, but core selection is still economically
-powerful. The requirements explicitly authorize this power; this implementation does not add a
-timelock, core allowlist or automatic finalization.
+its key can select a dishonest core with a plausible ABI, choose a different timeline that makes
+a recorded buy of its own the winner, discard unreadable rounds, or restart the failsafe's seven
+days with each switch. That can affect winners and liveness. There is no owner withdrawal or
+direct fee share, but core selection is still economically powerful. The requirements
+explicitly authorize this power; this implementation does not add a timelock, core allowlist or
+automatic finalization. It does refuse a replacement whose timeline is ahead of the clock, so a
+switch delays the failsafe by at most seven days and finalization cannot lock in a failsafe
+that never opens.
 
 Finalization fixes only this hook's pointer and cached timing. It cannot freeze SqueekChain's
 proxy upgrades or reporting. Its operator remains trusted to return authentic, coherent settled

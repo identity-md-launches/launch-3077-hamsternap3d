@@ -1501,6 +1501,19 @@
   },
   {
     "type": "function",
+    "name": "pageFailureSeenAt",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "poolBound",
     "inputs": [],
     "outputs": [
@@ -1960,6 +1973,31 @@
   },
   {
     "type": "event",
+    "name": "PageFailureSeen",
+    "inputs": [
+      {
+        "name": "scanRound",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "frontier",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "failsafeOpensAt",
+        "type": "uint256",
+        "indexed": false,
+        "internalType": "uint256"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
     "name": "PayoutDeferred",
     "inputs": [
       {
@@ -2040,6 +2078,11 @@
   {
     "type": "error",
     "name": "InvalidCoreFrontier",
+    "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "InvalidGenesis",
     "inputs": []
   },
   {

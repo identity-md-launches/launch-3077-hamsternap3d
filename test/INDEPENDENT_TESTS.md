@@ -94,7 +94,11 @@ placed in front of the call still takes nothing. No new finding this round.
   late, never early. An advance that only the `failsafe()` call itself finds reverts with
   `CoreNotStale`, and that revert also undoes the sighting. So the failsafe stays shut until a buy
   (dust is enough) or a `settleNaps` call records it. That is the conservative direction, and a
-  way out always exists, because buys read the core even when `roundPage` does not work.
+  way out always exists, because buys read the core even when `roundPage` does not work. The one
+  exception, added in the third revision, is a core whose frontier reads while its next page does
+  not: that `failsafe()` call records the page failure instead of reverting (keeping the sighting),
+  and the failsafe opens seven days after the record. The handler's core fails both reads
+  together, so this path is covered by `HamsterNap3D.recovery.t.sol`, not by the campaigns.
 - If the core advances and then starts reverting before any hook call sees the advance, the hook
   dates the failsafe from its last successful sighting. This is the documented exit for a dead core.
 

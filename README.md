@@ -132,9 +132,13 @@ Rules as implemented, with the constants in `HamsterNap3D`:
 5. **Claim.** `settleNaps(maxPages)` may be called by anyone. It reads `state()` for the certified
    frontier and `roundPage` 16 rounds at a time from the last scanned round, pays every nap found
    in order, and keeps its position between calls, so a long gap can be worked through in several
-   transactions. A nap whose third round is not yet certified waits. When the core cannot be
-   read (`state()` or `roundPage` reverts, has no code, or no longer decodes) the call reverts
-   with `CoreUnreadable` and keeps nothing.
+   transactions. A nap whose third round is not yet certified waits. When `state()` cannot be
+   read (it reverts, has no code, no longer decodes, or reports a frontier for a round that has
+   not ended) the scan runs through `lastSeenFrontier`, the last credible frontier the hook saw,
+   so naps the hook saw certified stay payable while `roundPage` still answers. The call reverts
+   with `CoreUnreadable`, keeping nothing, when a page cannot be read (`roundPage` reverts, no
+   longer decodes, or certifies nothing from the scan position) or when `state()` cannot be read
+   and no round the hook saw certified is left to scan.
 6. **Winners that cannot receive ETH** are credited in `owed` and pull with `withdrawOwed()`.
    The game never blocks on a payout: the payout call gives the winner's wallet a bounded
    `PAYOUT_GAS` = 100,000 gas (plus the EVM's 2,300 for a value transfer) and copies none of its
@@ -166,11 +170,22 @@ Rules as implemented, with the constants in `HamsterNap3D`:
    The hook sees the frontier only when it reads the core (every buy,
    every claim call and the failsafe itself), so it dates staleness conservatively from
    `frontierSeenAt`, the moment it last saw the frontier advance, or from the frontier round's end
-   if that is later: `failsafeOpensAt()` = max(`roundEnd(lastSeenFrontier)`, `frontierSeenAt`) +
+   if that is later: the frontier clock is max(`roundEnd(lastSeenFrontier)`, `frontierSeenAt`) +
    7 days. An advance the failsafe call itself finds restarts the 7 days, so a core recovering a
    backlog is never stale however old the rounds it is settling. Until the core has been read once
    (a core unreadable from the start), the clock runs from the game's start, not from genesis. If
-   the core reverts, the last frontier and sighting the hook recorded are used.
+   the core reverts, the last frontier and sighting the hook recorded are used. A reported
+   frontier for a round that has not ended (at or past `currentRound()`) is not credible, since a
+   settled round is over: it is ignored, never clamped, so a core repeating such a report cannot
+   keep the failsafe shut or push it out by years.
+   A core whose frontier keeps advancing while no page behind it can be read is stale too, or
+   nothing could ever pay the pot. A `failsafe()` call that finds the clock shut, `state()`
+   readable and the next unscanned page unreadable records that moment in `pageFailureSeenAt`
+   (event `PageFailureSeen`) and returns without reverting; from then on the failsafe also opens
+   7 days after that record (the page clock), and `failsafeOpensAt()` is the earlier of the two
+   clocks. Any certified page a later scan reads clears the record, and a `failsafe()` call whose
+   own scan reads a page stays shut unless the frontier clock is open. A dead core (`state()`
+   unreadable as well) is the frontier clock's case and records nothing.
 8. **First game, mainnet only.** On chain id 1, until the first nap is settled, a buy requires
    `balanceOf(tx.origin) >= 1` on the Sworn registry `0x0da2679000ea5380d1361cc3cca7d4e8c881f766`,
    read live on every buy. On Sepolia and every other chain the check is skipped. Sells always
@@ -188,12 +203,13 @@ Rules as implemented, with the constants in `HamsterNap3D`:
 
 Events: `Buy` for every recorded buy (with the executed gross, the fee and `qualifying`),
 `NapSettled`, `FailsafeTaken`, `PayoutDeferred`, `FeeRefunded`, `OwedWithdrawn`,
-`ClaimsRedeemed`, `FrontierSeen`, `GameStarted`, `PoolBound`, `CoreChanged(oldCore, newCore)`,
-`CoreFinalized(core)`. Both core-change addresses and the finalized core are indexed.
+`ClaimsRedeemed`, `FrontierSeen`, `PageFailureSeen(scanRound, frontier, failsafeOpensAt)`,
+`GameStarted`, `PoolBound`, `CoreChanged(oldCore, newCore)`, `CoreFinalized(core)`. Both
+core-change addresses and the finalized core are indexed.
 
 Views for the website: `pot()`, `latestBuyer()`, `buyCount()` / `buyAt(i)` (round, timestamp,
 fees through it, latest buyer then), `winnerBefore(napStart)`, `failsafeWinner()`,
-`failsafeOpensAt()`, `failsafeCutoff()`, `scanRound()`, `zeroRun()`, `lastSeenFrontier()`,
+`failsafeOpensAt()`, `failsafeCutoff()`, `pageFailureSeenAt()`, `scanRound()`, `zeroRun()`, `lastSeenFrontier()`,
 `owed(wallet)`, `core()`, `coreFinalized()`, `owner()`.
 `GENESIS_TIMESTAMP()` and `ROUND_DURATION()` retain their getter names but now read storage.
 `roundAt`, `roundStart` and `roundEnd` are now view functions using that stored timing.
@@ -232,24 +248,32 @@ hook with the old initial literals so the earlier live-ledger assertions remain 
 `setCore(ISqueekCore newCore)` is callable only by the fixed launch owner while
 `coreFinalized()` is false. It:
 
-1. Checks the old core's current frontier (also respecting a higher previously observed one).
-   If the game has started and pending rounds are readable, it reverts with
-   `NapsUnsettled(scanRound, frontier)`. Conservatively, **every readable pending round must be
-   scanned**, including worked rounds with no nap. Anyone can call `settleNaps` in bounded pages
-   before the owner retries. No payout happens inside `setCore`.
-2. Allows recovery if old `state()` or the **next pending page** cannot be read or makes no
-   progress. Unscanned old rounds are dropped. A readable prefix must be processed first with
-   `settleNaps`; a failure in a later page does not erase a payable earlier nap. A failure of the
-   old `configuration()` alone does not waive settlement, because its timing is already cached.
+1. Checks the old core's current frontier (also respecting a higher previously observed one;
+   when `state()` cannot be read, `lastSeenFrontier` stands in for it). If the game has started
+   and pending rounds are readable, it reverts with `NapsUnsettled(scanRound, frontier)`.
+   Conservatively, **every readable pending round must be scanned**, including worked rounds
+   with no nap. Anyone can call `settleNaps` in bounded pages before the owner retries. No payout
+   happens inside `setCore`.
+2. Allows recovery only if the **next pending page** cannot be read or makes no progress, up to
+   the frontier `state()` reports now or, failing that, the last credible one the hook saw.
+   Unscanned old rounds are then dropped. A readable prefix must be processed first with
+   `settleNaps`; a failure in a later page does not erase a payable earlier nap, and a failure
+   of `state()` alone does not drop a nap the hook saw certified while its page still reads. A
+   failure of the old `configuration()` alone does not waive settlement, because its timing is
+   already cached.
 3. Requires the new `configuration()` and `state()` to be readable, with uint64 genesis,
-   duration and frontier. Zero duration reverts `InvalidRoundDuration`; a maximal uint64
-   frontier reverts `InvalidCoreFrontier` because no next round can be represented. A codeless
-   address or invalid ABI reverts `CoreUnreadable`. Failed switches change nothing.
+   duration and frontier. Zero duration reverts `InvalidRoundDuration`; a genesis after the
+   current block reverts `InvalidGenesis`; a maximal uint64 frontier, or a frontier whose round
+   has not ended yet in the new core's own timing (genesis + frontier × duration after the
+   current block), reverts `InvalidCoreFrontier`: no honest core has settled a round that is
+   not over, and such a timeline would postpone the failsafe. A codeless address or invalid ABI
+   reverts `CoreUnreadable`. Failed switches change nothing.
 4. Stores the core, genesis and duration; starts scanning at `newFrontier + 1`; empties
    `zeroRun` and `zeroRunStart`; sets `lastSeenFrontier` to the new frontier and
-   `frontierSeenAt` to the switch timestamp; emits `CoreChanged`. The seven-day failsafe restarts
-   from the switch, or the new frontier's end if that is later. Already-settled new-core history
-   is not imported. A switch before the first swap still establishes this scan baseline.
+   `frontierSeenAt` to the switch timestamp; clears any recorded page failure; emits
+   `CoreChanged`. The seven-day failsafe restarts from the switch (the new frontier's round has
+   ended by then, so the switch is the later date). Already-settled new-core history is not
+   imported. A switch before the first swap still establishes this scan baseline.
 5. Preserves every buy record, the latest buyer, all fees and paid totals, the pot, native claims,
    deferred payouts/refunds, nap count and first-game state. New naps select by buy timestamp
    strictly before their first round's start; a buy before migration can win the first new nap,
@@ -264,9 +288,14 @@ and has exactly the same checks and reset behavior as any other switch.
 
 **Trust assumption:** before finalization the owner chooses the source of truth and its timing.
 ABI checks cannot prove that it represents the real hamster. An owner can install a dishonest
-core to influence which recorded buyer wins, drop unreadable history, or repeatedly restart the
-failsafe. There is no direct owner withdrawal, but that does not make core selection harmless.
-The independent review must assess this power first. Finalization freezes this hook's address
+core to influence which recorded buyer wins, including a buy of their own, drop unreadable
+history, or restart the failsafe's seven days with each switch. There is no direct owner
+withdrawal, but that does not make core selection harmless: the brief's "nothing goes to the
+owner" holds only for an owner who installs the real core. The hook bounds what a switch can
+do to the clock (the new timeline must already be running, so a switch can delay the failsafe
+by at most seven days, never by years) but adds no timelock, allowlist or delay, because the
+brief wants the core changeable until the operator's core is final. The independent review must
+assess this power first. Finalization freezes this hook's address
 and cached timing, **not** SqueekChain's proxy implementation, reporter or upgrade authority.
 Those remain outside trust assumptions. Sells never consult the core and remain available even
 if it reverts or after finalization; ordinary pool liquidity and slippage conditions still apply.
@@ -276,6 +305,21 @@ if it reverts or after finalization; ordinary pool liquidity and slippage condit
 `forge test` runs the original regression suites plus the new migration suite with
 `FOUNDRY_FUZZ_SEED=0x78af848289a6cfdfe3ce352b08b7f4d056e64612920bbac37985ea48ca384cc2`:
 
+- `test/HamsterNap3D.recovery.t.sol`: a core that half works. `state()` unreadable with pages
+  readable: `settleNaps` pays a nap the hook saw certified and then reports `CoreUnreadable`
+  when nothing seen is left; a 13-page certified backlog refused by the failsafe and worked
+  through by `settleNaps(100)` before the failsafe pays the rest; `setCore` refusing
+  `NapsUnsettled` over such a nap and going ahead once it is settled or once the page is
+  unreadable too. Pages unreadable with the frontier advancing after `finalizeCore`: the
+  recording `failsafe()` call (event, no revert, sighting kept), `CoreNotStale` with the
+  recorded opening for six days, the payout on the seventh; a readable page clearing the record
+  by `settleNaps` and by the failsafe's own scan (which then stays shut and rolls back); nothing
+  recorded for a dead core or while the next page reads; the open failsafe settling a readable
+  prefix and recording the page behind it. A frontier for the running round, or one 100,000
+  rounds ahead, ignored by buys with the clock untouched, and accepted the second its round
+  ends; the failsafe opening on time after a far-future misreport. `setCore` rejecting a future
+  genesis, a frontier whose round has not ended and a timeline a century out, accepting the
+  boundary second and a core at genesis, and restarting the seven days from the switch.
 - `test/HamsterNap3D.t.sol`: permissions, callback access, initialization from the factory
   only and once, native pair only; fees on exact-input and exact-output buys, no fee on sells,
   dust buys, the 0.001 ETH threshold, `tx.origin` as the buyer; partial fills against a price
@@ -297,7 +341,9 @@ if it reverts or after finalization; ordinary pool liquidity and slippage condit
   days old and the earlier winner not paid again, and a game opened by dust only paying the
   first later qualifying buyer; such a late buy still counting for a later nap when the core
   proves alive); a reverting, codeless, paused or re-ABI'd core with sells and buys still
-  working and claims reverting with `CoreUnreadable`; a winner contract that rejects ETH and
+  working and claims reverting with `CoreUnreadable` (and, for a core whose pages stop decoding
+  while its frontier reads, the failsafe recording that and paying a week later); a winner
+  contract that rejects ETH and
   later withdraws; a winner wallet that answers the payout with a gas-sized revert or return
   payload (the EIP-7702 return bomb) at 30M gas, credited and not blocking the next nap or the
   failsafe, then collecting through `withdrawOwed`; the payout gas bound (an ordinary wallet gets
@@ -391,7 +437,21 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
 - The failsafe pays what certified naps leave, never a certified nap's own pot: a nap the core
   certified before stalling (its three rounds inside `lastSeenFrontier`) belongs to the last
   buyer before it under rule 4, whoever bought later. Beyond 8 unscanned pages the failsafe
-  asks for `settleNaps` first instead of scanning without bound in one transaction.
+  asks for `settleNaps` first instead of scanning without bound in one transaction; that revert
+  is always recoverable, because `settleNaps` works through any readable backlog whether or not
+  `state()` still answers.
+- "Stale" has two clocks, because a core can fail in two ways the hook cannot tell apart from
+  the outside. The frontier clock covers a core that stops reporting progress. The page clock
+  covers a core that keeps reporting progress nobody can verify (a `roundPage` upgrade, a page
+  that no longer decodes, a core certifying nothing from the scan position): without it the pot
+  could never be paid after `finalizeCore`. The page clock starts only from a persisted sighting
+  of that state by a `failsafe()` call, never retroactively from an old scan, so a backlog that
+  simply went unclaimed for a week does not open the failsafe the moment a page hiccups: the
+  first call records the failure, and the payout needs the page still unreadable seven days
+  later. The failsafe's own scan reads pages, so a healthy core always shuts it again.
+- A frontier the core reports for a round that has not ended is ignored rather than clamped to
+  the last ended round: a clamp would move with the clock and count as a fresh advance on every
+  read, which is exactly what a misreporting core must not be able to do to the failsafe.
 - The hook accepts ETH only from the PoolManager, so stray transfers cannot muddle the pot.
 - Payouts give the winner's wallet 100,000 gas, copy no return data, run under a reentrancy
   lock with state updated before the call, and credit a failing payout instead of retrying it.
@@ -425,6 +485,14 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
 - **Failsafe with a backlog.** If `failsafe()` reverts with `NapsUnsettled`, call
   `settleNaps(maxPages)` until `scanRound` passes `lastSeenFrontier`, then call it again. The
   website's Claim button covers the first step; `failsafeWinner()` shows who the failsafe pays.
+  This works even when `state()` no longer answers: the scan then runs through the last
+  frontier the hook saw.
+- **Failsafe when the core reports progress nobody can read.** If `settleNaps` reverts with
+  `CoreUnreadable` while buys keep seeing the frontier advance (`FrontierSeen` events), call
+  `failsafe()` once: it records the failure (`PageFailureSeen`, `pageFailureSeenAt`) and
+  `failsafeOpensAt()` moves to seven days later. Call it again then. If the pages come back in
+  the meantime, `settleNaps` clears the record and pays the naps instead; do that before the
+  owner considers a switch.
 - **Failsafe after the core is gone for good.** Buys keep working and keep paying fees. Call
   `failsafe()` again whenever `failsafeWinner()` shows an amount: seven days after the latest
   buy, the fees since the previous payout go to the buyer who was last when they were paid.
@@ -434,7 +502,10 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
 - **Dependency risk.** If SqueekCore pauses or breaks, buys and sells keep working, claims revert
   until it returns, and the failsafe opens after seven days. If it is upgraded with a different
   read ABI, claims revert and the failsafe is the way out unless the owner migrates before
-  finalization. A switch restarts the clock. Review external proxy upgrades separately.
+  finalization: with `state()` broken the scan still finishes the rounds the hook saw certified
+  through `roundPage`; with `roundPage` broken the page clock opens the failsafe seven days
+  after a `failsafe()` call records it. A switch restarts the clock. Review external proxy
+  upgrades separately.
 - **Security.** Tests passing are not an audit. The brief asks for an independent adversarial
   review of the hook and its tests before release; this stage delivers the code and tests only.
 
@@ -462,6 +533,27 @@ v4-core's `ProtocolFees` imports. v4-periphery is not used.
   than treating `napStart` alone as a globally unique id. Historic buy rounds are never rewritten.
 
 ## Changes in the review revisions
+
+The third review (of the core-replacement version) reopened it with three reproducible
+liveness defects and one advisory, answered in `.imd-responses.json` and fixed here with
+regression tests in `test/HamsterNap3D.recovery.t.sol`; the reviewer's three proofs pass:
+
+- `settleNaps` and `setCore`'s old-core check gave up as soon as `state()` was unreadable, though
+  the hook had seen the frontier and `roundPage` still answered: a backlog of more than eight
+  pages could then never be paid (the failsafe refused it with `NapsUnsettled`, the only way
+  through was the reverting `settleNaps`), and `setCore` dropped naps it had seen certified.
+  Both now fall back to `lastSeenFrontier` (rule 5, replacement step 1 and 2).
+- A core whose `state()` kept advancing while `roundPage` was unreadable froze the pot for good
+  after `finalizeCore`: every failsafe call restarted the frontier clock. The page clock
+  (rule 7, `pageFailureSeenAt`, `PageFailureSeen`) opens the failsafe seven days after a
+  `failsafe()` call records that state.
+- A reported frontier for a round that has not ended was recorded and dated the failsafe from
+  that round's end, so one misreport pushed it out by years. Such a frontier is now ignored
+  (rule 7), and `setCore` refuses a replacement whose genesis or frontier round is still ahead
+  of the clock (`InvalidGenesis`, `InvalidCoreFrontier`), so a switch cannot do the same.
+- Advisory, on the owner's power over the core: the timeline checks above close the "failsafe a
+  century out, then finalize" avenue; the ability to pick the core, and so the winners, is the
+  brief's and stays, now stated plainly under the trust assumption.
 
 The second review reopened the revised version with one reproducible defect, fixed here with
 regression tests (`.imd-responses.json` answers each finding):

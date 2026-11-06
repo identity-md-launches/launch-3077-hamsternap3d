@@ -122,11 +122,17 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     uint64 public zeroRun;
     /// @notice The first round of the current zero-work run.
     uint64 public zeroRunStart;
-    /// @notice The highest frontier observed on the active core (rebased on each core switch).
+    /// @notice The highest credible frontier observed on the active core (rebased on each core
+    /// switch). A reported frontier whose round has not ended yet is not credible and is ignored.
     uint64 public lastSeenFrontier;
     /// @notice When the hook last saw `settledThroughRound` advance; the game's start until it does.
     /// The failsafe's seven days count from here (or from the frontier round's end, if later).
     uint256 public frontierSeenAt;
+    /// @notice When `failsafe()` first found the core's frontier readable but the next unscanned page
+    /// of it unreadable; 0 while no such failure stands. Any certified page read afterwards clears
+    /// it. A core whose frontier keeps advancing while no page behind it can be read is stale too:
+    /// the failsafe opens seven days after this record as well as seven days after a frontier stall.
+    uint256 public pageFailureSeenAt;
     /// @notice Naps settled (paid or found without a winner) so far.
     uint256 public napsSettled;
     /// @notice True once the first nap is settled: the end of the first game.
@@ -146,6 +152,7 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     event OwedWithdrawn(address indexed winner, uint256 amount);
     event ClaimsRedeemed(uint256 amount);
     event FrontierSeen(uint64 frontier);
+    event PageFailureSeen(uint64 scanRound, uint64 frontier, uint256 failsafeOpensAt);
     event CoreChanged(address indexed oldCore, address indexed newCore);
     event CoreFinalized(address indexed core);
 
@@ -172,6 +179,7 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     error CoreIsFinalized();
     error InvalidRoundDuration();
     error InvalidCoreFrontier();
+    error InvalidGenesis();
     error InsufficientCoreReadGas();
 
     constructor(IPoolManager poolManager_, address factory_, address owner_) BaseHook(poolManager_) {
@@ -200,8 +208,12 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     // ---------------------------------------------------------------- core administration
 
     /// @notice Replaces the core and its timing, until finalizeCore permanently disables this.
-    /// Readable old-core rounds must first be scanned with settleNaps. If state or the next pending
-    /// page cannot be read, the unscanned old rounds are dropped. No money or buy history is reset.
+    /// Readable old-core rounds must first be scanned with settleNaps. The old core's frontier is
+    /// what `state()` reports now or, if that cannot be read, the last credible frontier the hook
+    /// saw; only when the next pending page cannot be read either (or certifies nothing) are the
+    /// unscanned old rounds dropped. No money or buy history is reset. The new core's genesis and
+    /// frontier round must both lie in the past: a timeline that is still ahead of the clock cannot
+    /// be an honest core's, and would postpone the failsafe.
     /// @dev Every external dependency read is static. The payout lock also prevents an owner who
     /// wins a nap from switching timelines during an in-progress settlement.
     function setCore(ISqueekCore newCore) external onlyOwner nonReentrant {
@@ -210,8 +222,11 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
         (uint64 genesis, uint64 duration) = _readConfiguration(newCore);
         (bool ok, uint64 frontier) = _readFrontierFrom(newCore);
         if (!ok) revert CoreUnreadable();
-        // scanRound must represent the first round after the new frontier.
+        if (genesis > block.timestamp) revert InvalidGenesis();
+        // scanRound must represent the first round after the new frontier, and a settled round has
+        // ended: the new frontier's round must be over by now in the new core's own timing.
         if (frontier == type(uint64).max) revert InvalidCoreFrontier();
+        if (uint256(genesis) + uint256(frontier) * uint256(duration) > block.timestamp) revert InvalidCoreFrontier();
 
         address oldCore = address(core);
         core = newCore;
@@ -222,6 +237,7 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
         zeroRunStart = 0;
         lastSeenFrontier = frontier;
         frontierSeenAt = block.timestamp;
+        pageFailureSeenAt = 0;
         emit CoreChanged(oldCore, address(newCore));
     }
 
@@ -364,14 +380,21 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
 
     /// @notice Scans up to `maxPages` pages of settled rounds (16 rounds each) past the last scanned
     /// round and pays every nap found, in order. Anyone may call it; progress is kept between calls.
-    /// Reverts when the core cannot be read.
+    /// Scans through the frontier `state()` reports now or, when that cannot be read, through the
+    /// last credible frontier the hook saw, so certified naps stay payable while `roundPage` still
+    /// answers. Reverts with `CoreUnreadable` when a page cannot be read, or when `state()` cannot be
+    /// read and no round the hook saw certified is left to scan.
     /// @return settled The number of naps settled in this call.
     function settleNaps(uint256 maxPages) external nonReentrant returns (uint256 settled) {
         if (maxPages == 0) revert ZeroPages();
         if (scanRound == 0) revert GameNotStarted();
         (bool ok, uint64 frontier) = _readFrontier();
-        if (!ok) revert CoreUnreadable();
-        _noteFrontier(frontier);
+        if (ok) {
+            _noteFrontier(frontier);
+        } else {
+            frontier = lastSeenFrontier;
+            if (scanRound > frontier) revert CoreUnreadable();
+        }
         bool readable;
         (settled, readable) = _scan(frontier, maxPages);
         if (!readable) revert CoreUnreadable();
@@ -391,17 +414,38 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     /// pays only what those naps leave; when more than `FAILSAFE_SCAN_PAGES` pages are still
     /// unscanned it reverts with `NapsUnsettled` and `settleNaps` must catch up first. When the core
     /// cannot be read at all, nothing can be certified and the fees through the cutoff all go to the
-    /// failsafe's winner.
+    /// failsafe's winner. A core whose frontier keeps advancing while no page behind it can be read
+    /// is stale as well: when this call finds the failsafe shut, the frontier readable and the next
+    /// unscanned page unreadable, it records that (`pageFailureSeenAt`, event `PageFailureSeen`) and
+    /// returns instead of reverting; the failsafe then opens seven days later unless a page is read
+    /// in between. A readable page found by any scan clears the record.
     function failsafe() external nonReentrant {
         if (scanRound == 0) revert GameNotStarted();
         (bool ok, uint64 frontier) = _readFrontier();
         if (ok) _noteFrontier(frontier);
         frontier = lastSeenFrontier;
-        uint256 staleAt = failsafeOpensAt();
-        if (block.timestamp < staleAt) revert CoreNotStale(staleAt);
+        uint256 staleAt = _failsafeOpensAt();
+        if (block.timestamp < staleAt) {
+            if (ok && pageFailureSeenAt == 0 && scanRound <= frontier && !_nextPageReadable()) {
+                _recordPageFailure(frontier);
+                return;
+            }
+            revert CoreNotStale(staleAt);
+        }
         if (scanRound <= frontier) {
             (, bool readable) = _scan(frontier, FAILSAFE_SCAN_PAGES);
-            if (readable && scanRound <= frontier) revert NapsUnsettled(scanRound, frontier);
+            if (readable) {
+                // Every page read cleared the page clock: the frontier clock alone decides now.
+                staleAt = _failsafeOpensAt();
+                if (block.timestamp < staleAt) revert CoreNotStale(staleAt);
+                if (scanRound <= frontier) revert NapsUnsettled(scanRound, frontier);
+            } else if (ok && pageFailureSeenAt == 0) {
+                // A readable prefix cleared the record before a later page failed: record that page
+                // and, if the frontier clock is shut, keep the prefix's settlements and return.
+                _recordPageFailure(frontier);
+                staleAt = _failsafeOpensAt();
+                if (block.timestamp < staleAt) return;
+            }
         }
         (address winner, uint256 cumulative) = _stateBefore(_failsafeCutoff(staleAt));
         if (winner == address(0)) revert NoQualifyingBuyer();
@@ -517,10 +561,10 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     /// @notice The earliest timestamp at which the failsafe opens, given what the hook has seen so
     /// far: 7 days after the later of the last observed frontier advance (the game's start, if the
     /// core has never been readable) and the frontier round's end. A later observed advance moves it.
+    /// While a page failure stands recorded (`pageFailureSeenAt`) with certified rounds still
+    /// unscanned, it is 7 days after that record if earlier.
     function failsafeOpensAt() public view returns (uint256) {
-        uint256 since = roundEnd(lastSeenFrontier);
-        if (frontierSeenAt > since) since = frontierSeenAt;
-        return since + FAILSAFE_DELAY;
+        return _failsafeOpensAt();
     }
 
     /// @notice The moment a buy must precede to count for the failsafe now: the later of
@@ -540,6 +584,37 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
     function _failsafeCutoff(uint256 staleAt) private view returns (uint256) {
         uint256 aged = block.timestamp > FAILSAFE_DELAY ? block.timestamp - FAILSAFE_DELAY : 0;
         return aged > staleAt ? aged : staleAt;
+    }
+
+    /// @dev The opening the frontier alone justifies: seven days after the later of the frontier
+    /// round's end and the moment the hook saw it advance.
+    function _frontierStaleAt() private view returns (uint256) {
+        uint256 since = roundEnd(lastSeenFrontier);
+        if (frontierSeenAt > since) since = frontierSeenAt;
+        return since + FAILSAFE_DELAY;
+    }
+
+    /// @dev The earlier of the frontier clock and, while a page failure stands recorded with
+    /// certified rounds still unscanned, the page clock.
+    function _failsafeOpensAt() private view returns (uint256) {
+        uint256 opensAt = _frontierStaleAt();
+        if (pageFailureSeenAt != 0 && scanRound <= lastSeenFrontier) {
+            uint256 pagesStaleAt = pageFailureSeenAt + FAILSAFE_DELAY;
+            if (pagesStaleAt < opensAt) opensAt = pagesStaleAt;
+        }
+        return opensAt;
+    }
+
+    /// @dev Whether the next unscanned page can be read and certifies at least `scanRound`.
+    function _nextPageReadable() private view returns (bool) {
+        (bool ok, ISqueekCore.RoundPage memory page) =
+            _readPage(scanRound, uint64(_pageEnd(scanRound, lastSeenFrontier)));
+        return ok && page.certifiedThroughRound >= scanRound;
+    }
+
+    function _recordPageFailure(uint64 frontier) private {
+        pageFailureSeenAt = block.timestamp;
+        emit PageFailureSeen(scanRound, frontier, _failsafeOpensAt());
     }
 
     function _feeOnGross(uint256 gross) private pure returns (uint256) {
@@ -640,12 +715,13 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
 
     /// @dev Conservatively requires all readable pending rounds to be scanned, even if they turn
     /// out to contain no nap. Probe just the next page; settleNaps can make bounded progress first.
+    /// An unreadable `state()` does not excuse the probe: the last credible frontier bounds it, so
+    /// a nap the hook already saw certified is never dropped while `roundPage` still answers.
     function _requireOldCoreCaughtUp() private view {
         if (scanRound == 0) return;
         _requireCoreReadGas();
         (bool ok, uint64 frontier) = _readFrontier();
-        if (!ok) return;
-        if (frontier < lastSeenFrontier) frontier = lastSeenFrontier;
+        if (!ok || frontier < lastSeenFrontier) frontier = lastSeenFrontier;
         if (scanRound > frontier) return;
         uint64 through = uint64(_pageEnd(scanRound, frontier));
         _requireCoreReadGas();
@@ -664,12 +740,14 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
 
     /// @dev Records an observed advance of the frontier and when it was seen. The observation time
     /// is the conservative date for the failsafe: the core settled the round no later than this.
+    /// A settled round has ended, so a reported frontier at or past the running round is not
+    /// credible and is ignored (not clamped: a core repeating such a report must not keep the
+    /// failsafe shut).
     function _noteFrontier(uint64 frontier) private {
-        if (frontier > lastSeenFrontier) {
-            lastSeenFrontier = frontier;
-            frontierSeenAt = block.timestamp;
-            emit FrontierSeen(frontier);
-        }
+        if (frontier <= lastSeenFrontier || frontier >= currentRound()) return;
+        lastSeenFrontier = frontier;
+        frontierSeenAt = block.timestamp;
+        emit FrontierSeen(frontier);
     }
 
     /// @dev Scans up to `maxPages` pages of settled rounds from `scanRound` through `frontier` and
@@ -687,6 +765,7 @@ contract HamsterNap3D is BaseHook, IUnlockCallback {
                 readable = false;
                 break;
             }
+            if (pageFailureSeenAt != 0) pageFailureSeenAt = 0;
 
             uint256 index;
             for (uint64 round = from; round <= certified; round++) {
